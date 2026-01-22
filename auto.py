@@ -9,13 +9,13 @@ from aiocryptopay.const import Assets, PaidButtons, CurrencyType
 
 # ==================== KONFIGURASI ====================
 # Ganti dengan token bot Anda dari @BotFather
-BOT_TOKEN = 'YOUR_BOT_TOKEN_HERE'
+BOT_TOKEN = '7829954744:AAEJgjBWRTdaJmh7gsnLlE_cNo1TXl0i6EU'
 
 # Ganti dengan API token CryptoPay dari @CryptoBot
-CRYPTOPAY_TOKEN = 'YOUR_CRYPTOPAY_TOKEN_HERE'
+CRYPTOPAY_TOKEN = '519883:AAJsQ1LRbcYeeGw0RivIRdACWjpZGW8VGfL'
 
 # Link premium channel/group
-PREMIUM_LINK = 'https://t.me/+your_premium_link'
+PREMIUM_LINK = 'https://t.me/+V2JE9sIz35ZmZGNl'
 
 # Admin user ID (untuk notifikasi)
 ADMIN_ID = 123456789  # Ganti dengan user ID admin
