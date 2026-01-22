@@ -61,6 +61,9 @@ FINAL_PRICE = ORIGINAL_PRICE * (100 - DISCOUNT_PERCENT) / 100  # $150
 # File untuk menyimpan data user premium
 PREMIUM_DB_FILE = 'premium_users.json'
 
+# File untuk menyimpan pending invoices
+PENDING_INVOICES_FILE = 'pending_invoices.json'
+
 # Debug mode (True untuk melihat error detail)
 DEBUG_MODE = True
 
@@ -105,6 +108,44 @@ def get_premium_user(user_id):
     users = load_premium_users()
     return users.get(str(user_id))
 
+# ==================== PENDING INVOICES FUNCTIONS ====================
+def load_pending_invoices():
+    """Load pending invoices dari file JSON"""
+    if os.path.exists(PENDING_INVOICES_FILE):
+        try:
+            with open(PENDING_INVOICES_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_pending_invoices(data):
+    """Simpan pending invoices ke file JSON"""
+    with open(PENDING_INVOICES_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def add_pending_invoice(user_id, invoice_id, invoice_url):
+    """Tambah pending invoice untuk user"""
+    invoices = load_pending_invoices()
+    invoices[str(user_id)] = {
+        'invoice_id': invoice_id,
+        'invoice_url': invoice_url,
+        'created_at': datetime.now().isoformat()
+    }
+    save_pending_invoices(invoices)
+
+def get_pending_invoice(user_id):
+    """Get pending invoice untuk user"""
+    invoices = load_pending_invoices()
+    return invoices.get(str(user_id))
+
+def remove_pending_invoice(user_id):
+    """Hapus pending invoice setelah pembayaran sukses"""
+    invoices = load_pending_invoices()
+    if str(user_id) in invoices:
+        del invoices[str(user_id)]
+        save_pending_invoices(invoices)
+
 # ==================== CRYPTOPAY FUNCTIONS ====================
 
 # Cache untuk bot username (agar tidak perlu request berulang)
@@ -141,7 +182,7 @@ async def create_payment_invoice(user_id, username):
         bot_username = get_bot_username()
         
         # Buat invoice dengan fiat USD
-        # Catatan: paid_btn_url dibuat setelah invoice dibuat
+        # Catatan: paid_btn_url akan diupdate setelah invoice dibuat dengan ID spesifik
         invoice = await crypto.create_invoice(
             amount=FINAL_PRICE,
             fiat='USD',
@@ -153,6 +194,10 @@ async def create_payment_invoice(user_id, username):
             allow_comments=True,
             allow_anonymous=False
         )
+        
+        # Update paid_btn_url dengan invoice ID untuk tracking yang lebih baik
+        # (Ini hanya logging, URL sudah diset di atas)
+        print(f"📝 Invoice URL akan redirect ke: https://t.me/{bot_username}?start=paid_{invoice.invoice_id}")
         
         print(f"✅ Invoice created: {invoice.invoice_id}")
         return invoice
@@ -224,27 +269,29 @@ async def get_crypto_balance():
 def run_async(coro):
     """Helper untuk menjalankan async function"""
     try:
-        # Coba gunakan existing event loop
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Jika loop sudah running, buat yang baru
+        # Coba dapatkan existing event loop
+        try:
+            loop = asyncio.get_running_loop()
+            # Jika loop sudah running, kita tidak bisa menggunakan run_until_complete
+            # Buat loop baru
             loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    except RuntimeError:
-        # Tidak ada event loop, buat baru
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    try:
+        except RuntimeError:
+            # Tidak ada running loop, coba get atau buat baru
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        
         return loop.run_until_complete(coro)
     except Exception as e:
         print(f"❌ Async error: {e}")
+        if DEBUG_MODE:
+            traceback.print_exc()
         raise
-    finally:
-        try:
-            loop.close()
-        except:
-            pass
 
 # ==================== BOT HANDLERS ====================
 @bot.message_handler(commands=['start'])
@@ -252,12 +299,23 @@ def send_welcome(message):
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
     
-    # Cek jika ada parameter paid
+    # Cek jika ada parameter dari deep link
     args = message.text.split()
-    if len(args) > 1 and args[1].startswith('paid_'):
-        invoice_id = args[1].replace('paid_', '')
-        check_payment(message, invoice_id)
-        return
+    if len(args) > 1:
+        param = args[1]
+        # Handle paid_ prefix (dari callback setelah bayar)
+        if param.startswith('paid_'):
+            invoice_id = param.replace('paid_', '')
+            check_payment(message, invoice_id)
+            return
+        # Handle check_payment (dari tombol setelah bayar di CryptoPay)
+        elif param == 'check_payment':
+            # Cek apakah user punya pending invoice
+            pending = get_pending_invoice(user_id)
+            if pending:
+                check_payment(message, pending['invoice_id'])
+                return
+            # Jika tidak ada pending, lanjut ke welcome message
     
     # Cek apakah sudah premium
     if is_premium_user(user_id):
@@ -434,6 +492,9 @@ def handle_buy_premium(call):
     
     if invoice is not None:
         try:
+            # Simpan pending invoice untuk tracking
+            add_pending_invoice(user_id, invoice.invoice_id, invoice.bot_invoice_url)
+            
             payment_text = f"""
 💳 *INVOICE PEMBAYARAN*
 
@@ -543,6 +604,7 @@ def handle_verify_payment(call):
             if invoice.status == 'paid':
                 # Pembayaran sukses!
                 add_premium_user(user_id, username, invoice_id)
+                remove_pending_invoice(user_id)  # Hapus dari pending
                 
                 success_text = f"""
 🎉 *PEMBAYARAN BERHASIL!* 🎉
@@ -850,6 +912,7 @@ def check_payment(message, invoice_id):
         if invoice and invoice.status == 'paid':
             if not is_premium_user(user_id):
                 add_premium_user(user_id, username, invoice_id)
+            remove_pending_invoice(user_id)  # Hapus dari pending
             
             success_text = f"""
 🎉 *PEMBAYARAN BERHASIL!* 🎉
@@ -868,11 +931,33 @@ Klik tombol di bawah untuk akses! 👇
             markup.add(premium_btn)
             
             bot.send_message(message.chat.id, success_text, parse_mode='Markdown', reply_markup=markup)
+        elif invoice and invoice.status == 'active':
+            # Invoice masih aktif, belum dibayar
+            pending_text = f"""
+⏳ *MENUNGGU PEMBAYARAN*
+
+🔢 Invoice ID: `{invoice_id}`
+💰 Jumlah: ${int(FINAL_PRICE)}
+📊 Status: *Belum Dibayar*
+
+Silakan selesaikan pembayaran terlebih dahulu.
+            """
+            
+            markup = types.InlineKeyboardMarkup()
+            pay_btn = types.InlineKeyboardButton("💰 Bayar Sekarang", url=invoice.bot_invoice_url)
+            verify_btn = types.InlineKeyboardButton("✅ Sudah Bayar", callback_data=f'verify_{invoice_id}')
+            markup.add(pay_btn)
+            markup.add(verify_btn)
+            
+            bot.send_message(message.chat.id, pending_text, parse_mode='Markdown', reply_markup=markup)
         else:
-            # Redirect ke menu utama
+            # Invoice expired atau tidak ditemukan
             send_welcome(message)
             
-    except:
+    except Exception as e:
+        print(f"❌ Error in check_payment: {e}")
+        if DEBUG_MODE:
+            traceback.print_exc()
         send_welcome(message)
 
 @bot.message_handler(commands=['help'])
@@ -1016,11 +1101,11 @@ def admin_stats(message):
 @bot.message_handler(commands=['setadmin'])
 def set_admin_id(message):
     """Set admin ID (hanya sekali untuk setup awal)"""
+    global ADMIN_ID
     current_id = message.from_user.id
     
     # Jika ADMIN_ID masih default (123456789), izinkan siapa saja untuk set
     if ADMIN_ID == 123456789:
-        global ADMIN_ID
         ADMIN_ID = current_id
         bot.reply_to(
             message, 
