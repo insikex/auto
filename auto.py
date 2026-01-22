@@ -1,8 +1,38 @@
+"""
+VIP Premium Bot dengan CryptoPay Integration
+=============================================
+
+PANDUAN SETUP CRYPTO PAY API:
+
+1. Buka @CryptoBot di Telegram
+2. Klik "Crypto Pay" -> "My Apps" -> Pilih app Anda
+3. Klik "API Token" untuk mendapatkan token
+4. Copy token dan paste di CRYPTOPAY_TOKEN di bawah
+
+PENGATURAN SECURITY (Opsional):
+- Checks: Aktifkan untuk validasi tambahan
+- Transfers: Aktifkan jika ingin transfer antar akun
+- IP Allowlist: Jika diaktifkan, masukkan IP VPS Anda
+  * Untuk mengetahui IP VPS: curl ifconfig.me
+  * Masukkan IP di pengaturan CryptoPay -> Security -> IP Allowlist
+
+PENGATURAN WEBHOOKS (Opsional):
+- Webhooks memungkinkan notifikasi otomatis saat pembayaran
+- Untuk aktivasi, perlu endpoint HTTPS yang valid
+- Bot ini sudah memiliki polling, jadi webhooks opsional
+
+TROUBLESHOOTING:
+- Error "Unauthorized": Token API tidak valid
+- Error "Bad Request": Parameter tidak valid
+- Error "IP not allowed": Tambahkan IP VPS ke allowlist
+"""
+
 import telebot
 from telebot import types
 import asyncio
 import json
 import os
+import traceback
 from datetime import datetime
 from aiocryptopay import AioCryptoPay, Networks
 from aiocryptopay.const import Assets, PaidButtons, CurrencyType
@@ -12,12 +42,15 @@ from aiocryptopay.const import Assets, PaidButtons, CurrencyType
 BOT_TOKEN = '7829954744:AAEJgjBWRTdaJmh7gsnLlE_cNo1TXl0i6EU'
 
 # Ganti dengan API token CryptoPay dari @CryptoBot
+# Format: APP_ID:TOKEN (contoh: 519883:AAJsQ1LRbcYeeGw0RivIRdACWjpZGW8VGfL)
 CRYPTOPAY_TOKEN = '519883:AAJsQ1LRbcYeeGw0RivIRdACWjpZGW8VGfL'
 
 # Link premium channel/group
 PREMIUM_LINK = 'https://t.me/+V2JE9sIz35ZmZGNl'
 
 # Admin user ID (untuk notifikasi)
+# Gunakan /setadmin atau ganti manual dengan user ID Anda
+# Cara mendapatkan user ID: kirim pesan ke @userinfobot
 ADMIN_ID = 123456789  # Ganti dengan user ID admin
 
 # Harga Premium
@@ -27,6 +60,9 @@ FINAL_PRICE = ORIGINAL_PRICE * (100 - DISCOUNT_PERCENT) / 100  # $150
 
 # File untuk menyimpan data user premium
 PREMIUM_DB_FILE = 'premium_users.json'
+
+# Debug mode (True untuk melihat error detail)
+DEBUG_MODE = True
 
 # ==================== INISIALISASI ====================
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -70,52 +106,145 @@ def get_premium_user(user_id):
     return users.get(str(user_id))
 
 # ==================== CRYPTOPAY FUNCTIONS ====================
+
+# Cache untuk bot username (agar tidak perlu request berulang)
+_bot_username_cache = None
+
+def get_bot_username():
+    """Get bot username dengan caching"""
+    global _bot_username_cache
+    if _bot_username_cache is None:
+        try:
+            _bot_username_cache = bot.get_me().username
+        except Exception as e:
+            print(f"Error getting bot username: {e}")
+            _bot_username_cache = "unknown_bot"
+    return _bot_username_cache
+
 async def create_payment_invoice(user_id, username):
     """Buat invoice pembayaran CryptoPay"""
-    crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=Networks.MAIN_NET)
+    crypto = None
+    invoice = None
     
     try:
+        crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=Networks.MAIN_NET)
+        
+        # Verifikasi koneksi API dulu
+        try:
+            app_info = await crypto.get_me()
+            print(f"✅ Connected to CryptoPay App: {app_info.name}")
+        except Exception as api_error:
+            print(f"❌ CryptoPay API Error: {api_error}")
+            raise Exception(f"Gagal terhubung ke CryptoPay API: {str(api_error)}")
+        
+        # Get bot username untuk callback URL
+        bot_username = get_bot_username()
+        
         # Buat invoice dengan fiat USD
+        # Catatan: paid_btn_url dibuat setelah invoice dibuat
         invoice = await crypto.create_invoice(
             amount=FINAL_PRICE,
             fiat='USD',
             currency_type=CurrencyType.FIAT,
-            description=f'🌟 VIP Premium Lifetime Access\n'
-                       f'👤 User: {username}\n'
-                       f'💰 Harga Asli: ${ORIGINAL_PRICE}\n'
-                       f'🔥 Diskon: {DISCOUNT_PERCENT}%\n'
-                       f'✅ Final: ${FINAL_PRICE}',
+            description=f'VIP Premium Lifetime Access - User: {username}',
             paid_btn_name=PaidButtons.CALLBACK,
-            paid_btn_url=f'https://t.me/{bot.get_me().username}?start=paid_{invoice.invoice_id if hasattr(invoice, "invoice_id") else "check"}',
+            paid_btn_url=f'https://t.me/{bot_username}?start=check_payment',
             payload=f'{user_id}:{username}',
             allow_comments=True,
             allow_anonymous=False
         )
         
+        print(f"✅ Invoice created: {invoice.invoice_id}")
         return invoice
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error creating invoice: {error_msg}")
+        
+        # Re-raise dengan pesan yang lebih jelas
+        if "Unauthorized" in error_msg:
+            raise Exception("Token API tidak valid. Periksa konfigurasi CRYPTOPAY_TOKEN.")
+        elif "Bad Request" in error_msg:
+            raise Exception(f"Request tidak valid: {error_msg}")
+        elif "terhubung" in error_msg.lower() or "connect" in error_msg.lower():
+            raise Exception("Tidak dapat terhubung ke server CryptoPay. Coba lagi nanti.")
+        else:
+            raise Exception(f"Error CryptoPay: {error_msg}")
+    
     finally:
-        await crypto.close()
+        if crypto:
+            try:
+                await crypto.close()
+            except:
+                pass
 
 async def check_invoice_status(invoice_id):
     """Cek status pembayaran invoice"""
-    crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=Networks.MAIN_NET)
+    crypto = None
     
     try:
+        crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=Networks.MAIN_NET)
         invoices = await crypto.get_invoices(invoice_ids=[invoice_id])
-        if invoices:
+        
+        if invoices and len(invoices) > 0:
             return invoices[0]
         return None
+        
+    except Exception as e:
+        print(f"❌ Error checking invoice {invoice_id}: {e}")
+        raise Exception(f"Gagal mengecek invoice: {str(e)}")
+    
     finally:
-        await crypto.close()
+        if crypto:
+            try:
+                await crypto.close()
+            except:
+                pass
+
+async def get_crypto_balance():
+    """Cek saldo aplikasi CryptoPay"""
+    crypto = None
+    
+    try:
+        crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=Networks.MAIN_NET)
+        balance = await crypto.get_balance()
+        return balance
+        
+    except Exception as e:
+        print(f"❌ Error getting balance: {e}")
+        return None
+    
+    finally:
+        if crypto:
+            try:
+                await crypto.close()
+            except:
+                pass
 
 def run_async(coro):
     """Helper untuk menjalankan async function"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    try:
+        # Coba gunakan existing event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Jika loop sudah running, buat yang baru
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        # Tidak ada event loop, buat baru
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
     try:
         return loop.run_until_complete(coro)
+    except Exception as e:
+        print(f"❌ Async error: {e}")
+        raise
     finally:
-        loop.close()
+        try:
+            loop.close()
+        except:
+            pass
 
 # ==================== BOT HANDLERS ====================
 @bot.message_handler(commands=['start'])
@@ -282,11 +411,29 @@ def handle_buy_premium(call):
     
     bot.answer_callback_query(call.id, "Membuat invoice pembayaran... 💳")
     
+    # Kirim pesan loading
+    try:
+        bot.edit_message_text(
+            "⏳ *Membuat invoice pembayaran...*\n\nMohon tunggu sebentar.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown'
+        )
+    except:
+        pass
+    
     # Buat invoice
+    invoice = None
+    error_message = None
+    
     try:
         invoice = run_async(create_payment_invoice(user_id, username))
-        
-        if invoice:
+    except Exception as e:
+        error_message = str(e)
+        print(f"❌ Invoice creation failed: {error_message}")
+    
+    if invoice is not None:
+        try:
             payment_text = f"""
 💳 *INVOICE PEMBAYARAN*
 
@@ -330,27 +477,45 @@ Terima kasih! 🙏
                 parse_mode='Markdown',
                 reply_markup=markup
             )
-        else:
+        except Exception as e:
+            print(f"❌ Error sending payment message: {e}")
             bot.edit_message_text(
-                "❌ Gagal membuat invoice. Silakan coba lagi nanti.",
+                "❌ Gagal menampilkan invoice. Silakan coba lagi.",
                 call.message.chat.id,
                 call.message.message_id
             )
-            
-    except Exception as e:
+    else:
+        # Invoice gagal dibuat
+        error_display = error_message[:150] if error_message else "Unknown error"
+        
         error_text = f"""
 ❌ *Terjadi Kesalahan*
 
 Tidak dapat membuat invoice saat ini.
-Silakan coba lagi nanti atau hubungi admin.
 
-Error: `{str(e)[:100]}`
+🔍 *Detail Error:*
+`{error_display}`
+
+💡 *Solusi:*
+• Coba lagi beberapa saat
+• Pastikan koneksi internet stabil
+• Hubungi admin jika masalah berlanjut
+
+Klik tombol di bawah untuk mencoba lagi.
         """
+        
+        markup = types.InlineKeyboardMarkup()
+        retry_btn = types.InlineKeyboardButton("🔄 Coba Lagi", callback_data='buy_premium')
+        back_btn = types.InlineKeyboardButton("🔙 Kembali", callback_data='back_to_menu')
+        markup.add(retry_btn)
+        markup.add(back_btn)
+        
         bot.edit_message_text(
             error_text,
             call.message.chat.id,
             call.message.message_id,
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=markup
         )
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('verify_'))
@@ -362,10 +527,19 @@ def handle_verify_payment(call):
     
     bot.answer_callback_query(call.id, "Memeriksa pembayaran... 🔍")
     
+    invoice = None
+    error_message = None
+    
     try:
         invoice = run_async(check_invoice_status(int(invoice_id)))
-        
-        if invoice:
+    except Exception as e:
+        error_message = str(e)
+        print(f"❌ Error checking invoice: {error_message}")
+        if DEBUG_MODE:
+            traceback.print_exc()
+    
+    if invoice is not None:
+        try:
             if invoice.status == 'paid':
                 # Pembayaran sukses!
                 add_premium_user(user_id, username, invoice_id)
@@ -407,9 +581,10 @@ Klik tombol di bawah untuk akses konten premium! 👇
 🔢 Invoice: `{invoice_id}`
 ⏰ Waktu: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     """
-                    bot.send_message(ADMIN_ID, admin_text, parse_mode='Markdown')
-                except:
-                    pass
+                    if ADMIN_ID != 123456789:
+                        bot.send_message(ADMIN_ID, admin_text, parse_mode='Markdown')
+                except Exception as e:
+                    print(f"Failed to notify admin: {e}")
                     
             elif invoice.status == 'active':
                 pending_text = f"""
@@ -459,11 +634,63 @@ Silakan buat invoice baru.
                     parse_mode='Markdown',
                     reply_markup=markup
                 )
-        else:
-            bot.answer_callback_query(call.id, "❌ Invoice tidak ditemukan!", show_alert=True)
-            
-    except Exception as e:
-        bot.answer_callback_query(call.id, f"❌ Error: {str(e)[:50]}", show_alert=True)
+            else:
+                # Status lain (cancelled, dll)
+                other_text = f"""
+⚠️ *STATUS INVOICE*
+
+🔢 Invoice ID: `{invoice_id}`
+📊 Status: *{invoice.status.upper()}*
+
+Silakan buat invoice baru jika diperlukan.
+                """
+                
+                markup = types.InlineKeyboardMarkup()
+                new_btn = types.InlineKeyboardButton("🔄 Buat Invoice Baru", callback_data='buy_premium')
+                markup.add(new_btn)
+                
+                bot.edit_message_text(
+                    other_text,
+                    call.message.chat.id,
+                    call.message.message_id,
+                    parse_mode='Markdown',
+                    reply_markup=markup
+                )
+                
+        except Exception as e:
+            print(f"❌ Error processing invoice status: {e}")
+            bot.answer_callback_query(call.id, "❌ Gagal memproses. Coba lagi.", show_alert=True)
+    else:
+        # Invoice tidak ditemukan atau error
+        error_display = error_message[:100] if error_message else "Invoice tidak ditemukan"
+        
+        error_text = f"""
+❌ *GAGAL MENGECEK INVOICE*
+
+🔢 Invoice ID: `{invoice_id}`
+
+🔍 *Detail:*
+`{error_display}`
+
+💡 Silakan coba lagi atau buat invoice baru.
+        """
+        
+        markup = types.InlineKeyboardMarkup()
+        retry_btn = types.InlineKeyboardButton("🔄 Coba Lagi", callback_data=f'verify_{invoice_id}')
+        new_btn = types.InlineKeyboardButton("📝 Invoice Baru", callback_data='buy_premium')
+        markup.add(retry_btn)
+        markup.add(new_btn)
+        
+        try:
+            bot.edit_message_text(
+                error_text,
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+        except:
+            bot.answer_callback_query(call.id, f"❌ Error: {error_display[:50]}", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'check_payment')
 def handle_check_payment(call):
@@ -678,6 +905,137 @@ Hubungi admin jika ada masalah.
     """
     
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
+
+# ==================== ADMIN COMMANDS ====================
+@bot.message_handler(commands=['testapi'])
+def test_cryptopay_api(message):
+    """Test koneksi ke CryptoPay API (Admin only)"""
+    user_id = message.from_user.id
+    
+    # Cek apakah admin
+    if user_id != ADMIN_ID:
+        bot.reply_to(message, "❌ Perintah ini hanya untuk admin.")
+        return
+    
+    bot.reply_to(message, "🔄 Testing CryptoPay API connection...")
+    
+    async def test_api():
+        crypto = None
+        results = []
+        
+        try:
+            crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=Networks.MAIN_NET)
+            
+            # Test 1: Get app info
+            try:
+                app_info = await crypto.get_me()
+                results.append(f"✅ App Name: {app_info.name}")
+                results.append(f"✅ App ID: {app_info.app_id}")
+            except Exception as e:
+                results.append(f"❌ Get App Info Error: {str(e)[:100]}")
+            
+            # Test 2: Get balance
+            try:
+                balances = await crypto.get_balance()
+                if balances:
+                    results.append("✅ Balances:")
+                    for bal in balances:
+                        results.append(f"   • {bal.currency_code}: {bal.available}")
+                else:
+                    results.append("⚠️ No balance data")
+            except Exception as e:
+                results.append(f"❌ Get Balance Error: {str(e)[:100]}")
+            
+            # Test 3: Get exchange rates
+            try:
+                rates = await crypto.get_exchange_rates()
+                if rates:
+                    results.append(f"✅ Exchange Rates Available: {len(rates)} pairs")
+                else:
+                    results.append("⚠️ No exchange rates data")
+            except Exception as e:
+                results.append(f"❌ Get Rates Error: {str(e)[:100]}")
+            
+            return "\n".join(results)
+            
+        except Exception as e:
+            return f"❌ Connection Error: {str(e)}"
+        
+        finally:
+            if crypto:
+                try:
+                    await crypto.close()
+                except:
+                    pass
+    
+    try:
+        result = run_async(test_api())
+        
+        test_text = f"""
+🔧 *CRYPTOPAY API TEST RESULTS*
+
+{result}
+
+📋 *Configuration:*
+• Token: `{CRYPTOPAY_TOKEN[:10]}...{CRYPTOPAY_TOKEN[-5:]}`
+• Network: MAIN_NET
+• Price: ${int(FINAL_PRICE)}
+        """
+        
+        bot.send_message(message.chat.id, test_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Test failed: {str(e)}")
+
+@bot.message_handler(commands=['stats'])
+def admin_stats(message):
+    """Statistik bot (Admin only)"""
+    user_id = message.from_user.id
+    
+    if user_id != ADMIN_ID:
+        bot.reply_to(message, "❌ Perintah ini hanya untuk admin.")
+        return
+    
+    users = load_premium_users()
+    total_users = len(users)
+    total_revenue = sum(u.get('amount_paid', 0) for u in users.values())
+    
+    stats_text = f"""
+📊 *STATISTIK BOT*
+
+👥 Total Premium Users: {total_users}
+💰 Total Revenue: ${total_revenue}
+💵 Harga Saat Ini: ${int(FINAL_PRICE)}
+🔖 Diskon: {DISCOUNT_PERCENT}%
+
+🤖 Bot Status: Online
+    """
+    
+    bot.send_message(message.chat.id, stats_text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['setadmin'])
+def set_admin_id(message):
+    """Set admin ID (hanya sekali untuk setup awal)"""
+    current_id = message.from_user.id
+    
+    # Jika ADMIN_ID masih default (123456789), izinkan siapa saja untuk set
+    if ADMIN_ID == 123456789:
+        global ADMIN_ID
+        ADMIN_ID = current_id
+        bot.reply_to(
+            message, 
+            f"✅ Admin ID berhasil diset!\n\n"
+            f"User ID: `{current_id}`\n\n"
+            f"⚠️ PENTING: Update file auto.py, ganti:\n"
+            f"`ADMIN_ID = 123456789`\n"
+            f"dengan:\n"
+            f"`ADMIN_ID = {current_id}`",
+            parse_mode='Markdown'
+        )
+    elif current_id == ADMIN_ID:
+        bot.reply_to(message, f"✅ Kamu sudah menjadi admin.\n\nUser ID: `{current_id}`", parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "❌ Tidak diizinkan.")
 
 @bot.message_handler(func=lambda message: True)
 def echo_all(message):
