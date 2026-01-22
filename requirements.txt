@@ -1,0 +1,2 @@
+pyTelegramBotAPI>=4.30.0
+aiocryptopay>=0.4.8
