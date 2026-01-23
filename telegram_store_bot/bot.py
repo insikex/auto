@@ -31,7 +31,7 @@ from handlers.start import (
 )
 from handlers.shop import (
     menu_shop,
-    shop_scripts,
+    # shop_scripts,  # Script Bot feature removed - automatic script delivery disabled
     shop_apps,
     shop_panel,
     shop_admin_panel,
@@ -42,13 +42,14 @@ from handlers.shop import (
     cancel_payment_callback,
     sold_out_callback
 )
-from handlers.deposit import (
-    menu_deposit,
-    process_deposit,
-    deposit_conversation,
-    check_deposit_callback,
-    cancel_deposit_callback
-)
+# Deposit feature removed - QRIS deposit via Pakasir.com disabled
+# from handlers.deposit import (
+#     menu_deposit,
+#     process_deposit,
+#     deposit_conversation,
+#     check_deposit_callback,
+#     cancel_deposit_callback
+# )
 from handlers.owner import (
     menu_owner,
     owner_toggle_panel,
@@ -251,8 +252,8 @@ def main():
     )
     application.add_handler(shorten_conv)
     
-    # Deposit conversation
-    application.add_handler(deposit_conversation)
+    # Deposit conversation - REMOVED
+    # application.add_handler(deposit_conversation)
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 🔘 CALLBACK HANDLERS
@@ -268,7 +269,7 @@ def main():
     
     # Shop
     application.add_handler(CallbackQueryHandler(menu_shop, pattern="^menu_shop$"))
-    application.add_handler(CallbackQueryHandler(shop_scripts, pattern="^shop_scripts$"))
+    # application.add_handler(CallbackQueryHandler(shop_scripts, pattern="^shop_scripts$"))  # Script Bot feature removed
     application.add_handler(CallbackQueryHandler(shop_apps, pattern="^shop_apps$"))
     application.add_handler(CallbackQueryHandler(shop_panel, pattern="^shop_panel$"))
     application.add_handler(CallbackQueryHandler(shop_admin_panel, pattern="^shop_admin_panel$"))
@@ -279,11 +280,11 @@ def main():
     application.add_handler(CallbackQueryHandler(cancel_payment_callback, pattern="^cancel_payment_"))
     application.add_handler(CallbackQueryHandler(sold_out_callback, pattern="^sold_out$"))
     
-    # Deposit
-    application.add_handler(CallbackQueryHandler(menu_deposit, pattern="^menu_deposit$"))
-    application.add_handler(CallbackQueryHandler(process_deposit, pattern="^deposit_\\d+$"))
-    application.add_handler(CallbackQueryHandler(check_deposit_callback, pattern="^check_deposit_"))
-    application.add_handler(CallbackQueryHandler(cancel_deposit_callback, pattern="^cancel_deposit_"))
+    # Deposit - REMOVED (QRIS deposit via Pakasir.com disabled)
+    # application.add_handler(CallbackQueryHandler(menu_deposit, pattern="^menu_deposit$"))
+    # application.add_handler(CallbackQueryHandler(process_deposit, pattern="^deposit_\\d+$"))
+    # application.add_handler(CallbackQueryHandler(check_deposit_callback, pattern="^check_deposit_"))
+    # application.add_handler(CallbackQueryHandler(cancel_deposit_callback, pattern="^cancel_deposit_"))
     
     # Owner
     application.add_handler(CallbackQueryHandler(menu_owner, pattern="^menu_owner$"))
