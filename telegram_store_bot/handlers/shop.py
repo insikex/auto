@@ -28,12 +28,15 @@ async def menu_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ║  Silakan pilih layanan yang      ║
 ║  ingin Anda order:               ║
 ║                                  ║
+║  💳 Pembayaran otomatis via QRIS ║
+║  📦 Pengiriman data otomatis     ║
+║                                  ║
 ╚══════════════════════════════════╝
 """
     
     keyboard = InlineKeyboardMarkup([
+        # Script Bot option removed - automatic script delivery disabled
         [
-            InlineKeyboardButton(f"📁 Script Bot", callback_data="shop_scripts"),
             InlineKeyboardButton(f"📱 Apps Premium", callback_data="shop_apps")
         ],
         [
@@ -188,17 +191,24 @@ async def shop_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle product purchase"""
+    """Handle product purchase - Only supports Apps Premium now"""
     query = update.callback_query
     data = query.data
     user = update.effective_user
     
     await query.answer()
     
-    # Parse product type and ID
+    # Parse product type and ID - Script feature removed
     if data.startswith("buy_script_"):
-        product_id = int(data.replace("buy_script_", ""))
-        product_type = "script"
+        # Script buying disabled
+        await query.edit_message_text(
+            "❌ Fitur pembelian script telah dinonaktifkan.\n\nSilakan hubungi owner untuk informasi lebih lanjut.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📞 Hubungi Owner", callback_data="menu_contact_owner")],
+                [InlineKeyboardButton("🔙 Kembali", callback_data="menu_shop")]
+            ])
+        )
+        return
     elif data.startswith("buy_app_"):
         product_id = int(data.replace("buy_app_", ""))
         product_type = "app"
@@ -238,10 +248,10 @@ async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 Kembali", callback_data=f"shop_{product_type}s")]
         ])
     else:
-        text += f"\n⚠️ Saldo tidak cukup. Silakan deposit atau bayar langsung."
+        text += f"\n⚠️ Saldo tidak cukup. Silakan bayar langsung dengan QRIS."
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💳 Bayar dengan QRIS", callback_data=f"pay_qris_{product_type}_{product_id}")],
-            [InlineKeyboardButton("💰 Deposit Saldo", callback_data="menu_deposit")],
+            # Deposit option removed - QRIS deposit via Pakasir.com disabled
             [InlineKeyboardButton("🔙 Kembali", callback_data=f"shop_{product_type}s")]
         ])
     
@@ -275,9 +285,9 @@ async def pay_with_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     balance = await db.get_user_balance(user.id)
     if balance < product['price']:
         await query.edit_message_text(
-            "❌ Saldo tidak cukup!",
+            "❌ Saldo tidak cukup!\n\nSilakan gunakan pembayaran QRIS langsung.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💰 Deposit", callback_data="menu_deposit")],
+                [InlineKeyboardButton("💳 Bayar dengan QRIS", callback_data=f"pay_qris_{product_type}_{product_id}")],
                 [InlineKeyboardButton("🔙 Kembali", callback_data="menu_shop")]
             ])
         )

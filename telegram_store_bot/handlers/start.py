@@ -51,8 +51,8 @@ def get_main_keyboard(is_owner: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"{e['tools']} Menu Tools", callback_data="menu_tools")
         ],
         [
-            InlineKeyboardButton(f"{e['user']} Profil Saya", callback_data="menu_profile"),
-            InlineKeyboardButton(f"{e['money']} Deposit", callback_data="menu_deposit")
+            InlineKeyboardButton(f"{e['user']} Profil Saya", callback_data="menu_profile")
+            # Deposit button removed - QRIS deposit via Pakasir.com disabled
         ],
         [
             InlineKeyboardButton(f"📢 Channel Info", url=f"https://t.me/{config.CHANNEL_USERNAME}"),
@@ -218,8 +218,8 @@ async def menu_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(f"{e['money']} Deposit Saldo", callback_data="menu_deposit"),
-            InlineKeyboardButton("📜 Riwayat", callback_data="menu_history")
+            InlineKeyboardButton("📜 Riwayat Transaksi", callback_data="menu_history")
+            # Deposit button removed - QRIS deposit via Pakasir.com disabled
         ],
         [InlineKeyboardButton(f"{e['back']} Kembali", callback_data="back_main")]
     ])
