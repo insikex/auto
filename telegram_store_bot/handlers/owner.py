@@ -73,8 +73,7 @@ async def menu_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🗑️ Hapus Produk", callback_data="owner_delete_product")
         ],
         [
-            InlineKeyboardButton("➕ Add Account", callback_data="owner_add_account"),
-            InlineKeyboardButton("💰 Add Saldo User", callback_data="owner_add_balance")
+            InlineKeyboardButton("➕ Add Account", callback_data="owner_add_account")
         ],
         [
             InlineKeyboardButton("📜 Transaksi Pending", callback_data="owner_pending_txns"),
@@ -558,90 +557,47 @@ async def owner_receive_account_data(update: Update, context: ContextTypes.DEFAU
 
 
 async def owner_add_balance_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start adding balance to user"""
+    """Start adding balance to user - DISABLED (balance feature removed)"""
     query = update.callback_query
     
     if not is_owner(update.effective_user.id):
         await query.answer("🚫 Bukan owner!", show_alert=True)
         return
     
-    await query.answer()
+    await query.answer("❌ Fitur saldo sudah dihapus!", show_alert=True)
     
     await query.edit_message_text(
-        "💰 <b>TAMBAH SALDO USER</b>\n\n"
-        "Kirim User ID yang ingin ditambah saldo:\n\n"
-        "Ketik /cancel untuk membatalkan.",
-        parse_mode='HTML'
-    )
-    
-    context.user_data['adding_balance'] = True
-    return WAITING_ADD_BALANCE_USER
-
-
-async def owner_receive_balance_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive user ID for balance"""
-    try:
-        user_id = int(update.message.text)
-    except ValueError:
-        await update.message.reply_text("❌ User ID harus angka!")
-        return WAITING_ADD_BALANCE_USER
-    
-    user = await db.get_user(user_id)
-    if not user:
-        await update.message.reply_text("❌ User tidak ditemukan!")
-        return WAITING_ADD_BALANCE_USER
-    
-    context.user_data['balance_user_id'] = user_id
-    current_balance = user['balance']
-    
-    await update.message.reply_text(
-        f"👤 User ID: <code>{user_id}</code>\n"
-        f"💰 Saldo saat ini: {format_currency(current_balance)}\n\n"
-        f"Kirim jumlah saldo yang ingin ditambahkan:",
-        parse_mode='HTML'
-    )
-    
-    return WAITING_ADD_BALANCE_AMOUNT
-
-
-async def owner_receive_balance_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive balance amount"""
-    try:
-        amount = int(update.message.text.replace('.', '').replace(',', ''))
-    except ValueError:
-        await update.message.reply_text("❌ Jumlah harus angka!")
-        return WAITING_ADD_BALANCE_AMOUNT
-    
-    user_id = context.user_data.get('balance_user_id')
-    
-    new_balance = await db.update_balance(user_id, amount)
-    
-    context.user_data['adding_balance'] = False
-    context.user_data['balance_user_id'] = None
-    
-    await update.message.reply_text(
-        f"✅ <b>Saldo Berhasil Ditambahkan!</b>\n\n"
-        f"👤 User ID: <code>{user_id}</code>\n"
-        f"➕ Ditambahkan: {format_currency(amount)}\n"
-        f"💰 Saldo Baru: {format_currency(new_balance)}",
+        "❌ <b>FITUR SALDO DIHAPUS</b>\n\n"
+        "Fitur saldo user sudah tidak tersedia.\n"
+        "Pembayaran sekarang langsung melalui QRIS Pakasir.",
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("👑 Menu Owner", callback_data="menu_owner")]
         ])
     )
     
-    # Notify user
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"🎁 <b>Selamat!</b>\n\n"
-                 f"Saldo Anda telah ditambahkan sebesar {format_currency(amount)} oleh Admin.\n"
-                 f"💰 Saldo Sekarang: {format_currency(new_balance)}",
-            parse_mode='HTML'
-        )
-    except:
-        pass
-    
+    return ConversationHandler.END
+
+
+async def owner_receive_balance_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive user ID for balance - DISABLED"""
+    await update.message.reply_text(
+        "❌ Fitur saldo sudah dihapus.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👑 Menu Owner", callback_data="menu_owner")]
+        ])
+    )
+    return ConversationHandler.END
+
+
+async def owner_receive_balance_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive balance amount - DISABLED"""
+    await update.message.reply_text(
+        "❌ Fitur saldo sudah dihapus.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👑 Menu Owner", callback_data="menu_owner")]
+        ])
+    )
     return ConversationHandler.END
 
 
@@ -697,8 +653,9 @@ async def owner_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for i, user in enumerate(users[:20], 1):  # Show max 20
             username = f"@{user['username']}" if user.get('username') else "-"
-            text += f"{i}. <code>{user['id']}</code> | {username}\n"
-            text += f"   💰 {format_currency(user['balance'])}\n"
+            name = user.get('first_name') or '-'
+            text += f"{i}. <code>{user['id']}</code>\n"
+            text += f"   👤 {escape_html(name)} | {username}\n"
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Kembali", callback_data="menu_owner")]

@@ -196,8 +196,6 @@ async def menu_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     e = config.EMOJI
     
     # Get user data
-    user_data = await db.get_user(user.id)
-    balance = user_data['balance'] if user_data else 0
     transactions = await db.get_user_transactions(user.id, limit=5)
     
     name = f"{user.first_name or ''} {user.last_name or ''}".strip()
@@ -211,15 +209,18 @@ async def menu_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ║  <b>Username:</b> {username}
 ║  <b>ID:</b> <code>{user.id}</code>
 ╠══════════════════════════════════╣
-║  {e['money']} <b>Saldo:</b> {format_currency(balance)}
 ║  📦 <b>Total Transaksi:</b> {len(transactions)}
+║                                  ║
+║  💳 Pembayaran via QRIS Pakasir  ║
 ╚══════════════════════════════════╝
 """
     
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📜 Riwayat Transaksi", callback_data="menu_history")
-            # Deposit button removed - QRIS deposit via Pakasir.com disabled
+        ],
+        [
+            InlineKeyboardButton("🛒 Belanja Sekarang", callback_data="menu_shop")
         ],
         [InlineKeyboardButton(f"{e['back']} Kembali", callback_data="back_main")]
     ])
