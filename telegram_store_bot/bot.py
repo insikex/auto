@@ -36,13 +36,13 @@ from handlers.shop import (
     shop_panel,
     shop_admin_panel,
     buy_product,
-    pay_with_balance,
-    pay_with_qris,
+    pay_with_balance,  # Kept for backward compatibility - redirects to QRIS
+    pay_with_qris,  # Kept for backward compatibility - redirects to buy_product
     check_payment_callback,
     cancel_payment_callback,
     sold_out_callback
 )
-# Deposit feature removed - QRIS deposit via Pakasir.com disabled
+# Deposit & Balance features removed - Direct QRIS payment via Pakasir.com
 # from handlers.deposit import (
 #     menu_deposit,
 #     process_deposit,
@@ -203,7 +203,7 @@ def main():
     )
     application.add_handler(broadcast_conv)
     
-    # Owner: Add Balance
+    # Owner: Add Balance - DISABLED (balance feature removed, shows error message)
     add_balance_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(owner_add_balance_start, pattern="^owner_add_balance$")],
         states={
@@ -267,15 +267,15 @@ def main():
     application.add_handler(CallbackQueryHandler(menu_history, pattern="^menu_history$"))
     application.add_handler(CallbackQueryHandler(menu_contact_owner, pattern="^menu_contact_owner$"))
     
-    # Shop
+    # Shop - Direct QRIS payment (balance feature removed)
     application.add_handler(CallbackQueryHandler(menu_shop, pattern="^menu_shop$"))
     # application.add_handler(CallbackQueryHandler(shop_scripts, pattern="^shop_scripts$"))  # Script Bot feature removed
     application.add_handler(CallbackQueryHandler(shop_apps, pattern="^shop_apps$"))
     application.add_handler(CallbackQueryHandler(shop_panel, pattern="^shop_panel$"))
     application.add_handler(CallbackQueryHandler(shop_admin_panel, pattern="^shop_admin_panel$"))
-    application.add_handler(CallbackQueryHandler(buy_product, pattern="^buy_(script|app)_"))
-    application.add_handler(CallbackQueryHandler(pay_with_balance, pattern="^pay_balance_"))
-    application.add_handler(CallbackQueryHandler(pay_with_qris, pattern="^pay_qris_"))
+    application.add_handler(CallbackQueryHandler(buy_product, pattern="^buy_(script|app)_"))  # Directly generates QRIS
+    application.add_handler(CallbackQueryHandler(pay_with_balance, pattern="^pay_balance_"))  # Disabled - shows error message
+    application.add_handler(CallbackQueryHandler(pay_with_qris, pattern="^pay_qris_"))  # Redirects to buy_product
     application.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^check_payment_"))
     application.add_handler(CallbackQueryHandler(cancel_payment_callback, pattern="^cancel_payment_"))
     application.add_handler(CallbackQueryHandler(sold_out_callback, pattern="^sold_out$"))

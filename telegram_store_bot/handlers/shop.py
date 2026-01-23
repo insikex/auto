@@ -191,12 +191,12 @@ async def shop_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle product purchase - Only supports Apps Premium now"""
+    """Handle product purchase - Directly show QRIS payment"""
     query = update.callback_query
     data = query.data
     user = update.effective_user
     
-    await query.answer()
+    await query.answer("⏳ Membuat pembayaran QRIS...")
     
     # Parse product type and ID - Script feature removed
     if data.startswith("buy_script_"):
@@ -233,115 +233,11 @@ async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
     
-    # Check user balance
-    balance = await db.get_user_balance(user.id)
-    price = product['price']
-    
-    text = format_product_card(product, show_stock=(product_type == "app"))
-    text += f"\n\n💰 <b>Saldo Anda:</b> {format_currency(balance)}"
-    
-    if balance >= price:
-        text += f"\n✅ Saldo cukup untuk membeli!"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Bayar dengan Saldo", callback_data=f"pay_balance_{product_type}_{product_id}")],
-            [InlineKeyboardButton("💳 Bayar dengan QRIS", callback_data=f"pay_qris_{product_type}_{product_id}")],
-            [InlineKeyboardButton("🔙 Kembali", callback_data=f"shop_{product_type}s")]
-        ])
-    else:
-        text += f"\n⚠️ Saldo tidak cukup. Silakan bayar langsung dengan QRIS."
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Bayar dengan QRIS", callback_data=f"pay_qris_{product_type}_{product_id}")],
-            # Deposit option removed - QRIS deposit via Pakasir.com disabled
-            [InlineKeyboardButton("🔙 Kembali", callback_data=f"shop_{product_type}s")]
-        ])
-    
-    await query.edit_message_text(
-        text=text,
-        parse_mode='HTML',
-        reply_markup=keyboard
-    )
-
-
-async def pay_with_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle payment with balance"""
-    query = update.callback_query
-    data = query.data
-    user = update.effective_user
-    
-    await query.answer("⏳ Memproses pembayaran...")
-    
-    # Parse data
-    parts = data.replace("pay_balance_", "").split("_")
-    product_type = parts[0]
-    product_id = int(parts[1])
-    
-    # Get product
-    product = await db.get_product(product_id)
-    if not product:
-        await query.edit_message_text("❌ Produk tidak ditemukan.")
-        return
-    
-    # Check balance
-    balance = await db.get_user_balance(user.id)
-    if balance < product['price']:
-        await query.edit_message_text(
-            "❌ Saldo tidak cukup!\n\nSilakan gunakan pembayaran QRIS langsung.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 Bayar dengan QRIS", callback_data=f"pay_qris_{product_type}_{product_id}")],
-                [InlineKeyboardButton("🔙 Kembali", callback_data="menu_shop")]
-            ])
-        )
-        return
-    
-    # Process payment
-    try:
-        # Deduct balance
-        await db.update_balance(user.id, -product['price'])
-        
-        # Create transaction record
-        order_id = generate_order_id("BAL")
-        await db.create_transaction(
-            order_id=order_id,
-            user_id=user.id,
-            product_type=product_type,
-            product_id=product_id,
-            product_name=product['name'],
-            amount=product['price'],
-            total_payment=product['price']
-        )
-        await db.update_transaction_status(order_id, 'completed')
-        
-        # Deliver product
-        await deliver_product(update, context, product, product_type, order_id)
-        
-    except Exception as e:
-        await query.edit_message_text(f"❌ Terjadi kesalahan: {str(e)}")
-
-
-async def pay_with_qris(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle QRIS payment"""
-    query = update.callback_query
-    data = query.data
-    user = update.effective_user
-    
-    await query.answer("⏳ Membuat pembayaran QRIS...")
-    
-    # Parse data
-    parts = data.replace("pay_qris_", "").split("_")
-    product_type = parts[0]
-    product_id = int(parts[1])
-    
-    # Get product
-    product = await db.get_product(product_id)
-    if not product:
-        await query.edit_message_text("❌ Produk tidak ditemukan.")
-        return
-    
-    # Generate order ID
+    # Generate order ID and create QRIS payment directly
     order_id = generate_order_id("QRS")
     amount = product['price']
     
-    # Create QRIS payment
+    # Create QRIS payment via Pakasir
     result = await payment.create_qris_transaction(order_id, amount)
     
     if not result or not result.get('success'):
@@ -349,7 +245,7 @@ async def pay_with_qris(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"❌ Gagal membuat pembayaran: {error_msg}\n\nSilakan coba lagi.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"pay_qris_{product_type}_{product_id}")],
+                [InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"buy_{product_type}_{product_id}")],
                 [InlineKeyboardButton("🔙 Kembali", callback_data="menu_shop")]
             ])
         )
@@ -414,6 +310,46 @@ async def pay_with_qris(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Start payment checker
     context.application.create_task(
         check_payment_loop(context, user.id, order_id, amount, product, product_type)
+    )
+
+
+async def pay_with_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle payment with balance - DISABLED (balance feature removed)"""
+    query = update.callback_query
+    await query.answer("❌ Fitur saldo sudah tidak tersedia!", show_alert=True)
+    
+    await query.edit_message_text(
+        "❌ <b>Fitur Saldo Tidak Tersedia</b>\n\n"
+        "Pembayaran hanya dapat dilakukan melalui QRIS.\n"
+        "Silakan pilih produk dan bayar langsung dengan QRIS.",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛒 Lihat Produk", callback_data="shop_apps")],
+            [InlineKeyboardButton("🔙 Kembali", callback_data="menu_shop")]
+        ])
+    )
+
+
+async def pay_with_qris(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle QRIS payment - Redirect to buy product (QRIS now generated directly)"""
+    query = update.callback_query
+    data = query.data
+    
+    await query.answer("⏳ Memproses...")
+    
+    # Parse data and redirect to buy_product
+    parts = data.replace("pay_qris_", "").split("_")
+    product_type = parts[0]
+    product_id = parts[1]
+    
+    # Redirect to buy product which now generates QRIS directly
+    await query.edit_message_text(
+        "⏳ <b>Membuat pembayaran QRIS...</b>\n\nSilakan klik tombol di bawah untuk melanjutkan.",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Buat QRIS Pembayaran", callback_data=f"buy_{product_type}_{product_id}")],
+            [InlineKeyboardButton("🔙 Kembali", callback_data="menu_shop")]
+        ])
     )
 
 
