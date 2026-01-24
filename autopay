@@ -41,23 +41,23 @@ BOT_TOKEN = '6613883967:AAGNJ7oJQIbWZ-snY_dqy9rGDw_6nXbUrpY'
 # CryptoPay Token
 # TESTNET: Dari @CryptoTestnetBot -> Crypto Pay -> My Apps
 # MAINNET: Dari @CryptoBot -> Crypto Pay -> My Apps
-CRYPTOPAY_TOKEN = '53408:AA2RZsK4Y7gfG13O63eVfAiX0kruSc6gJEv'
+CRYPTOPAY_TOKEN = '519883:AAJsQ1LRbcYeeGw0RivIRdACWjpZGW8VGfL'
 
 # KkPay Configuration
 # Dapatkan dari https://www.gamepay.tech merchant panel
-KKPAY_ID = 'YOUR_KKPAY_ID'
-KKPAY_SECRET = 'YOUR_KKPAY_SECRET'
+KKPAY_ID = '8138'
+KKPAY_SECRET = 'e0e5a098fc93c156cfdad9d43e9a3417'
 
 # OkayPay Configuration
 # Dapatkan dari https://okaypay.me merchant panel
-OKAYPAY_ID = 'YOUR_OKAYPAY_ID'
-OKAYPAY_TOKEN = 'YOUR_OKAYPAY_TOKEN'
+OKAYPAY_ID = '27994'
+OKAYPAY_TOKEN = '98Vd6feiQGUqglxABsKOSW02r4Jw7Za'
 
 # ⚠️ TESTNET MODE - Set True untuk testing, False untuk production
-USE_TESTNET = True
+USE_TESTNET = False
 
 # Link Premium Channel (private invite link)
-PREMIUM_LINK = 'https://t.me/+V2JE9sIz35ZmZGNl'
+PREMIUM_LINK = 'https://t.me/+RczGHAYyuPthMjll
 
 # Admin ID (untuk notifikasi internal saja, tidak ditampilkan ke user)
 ADMIN_ID = 6683929810
