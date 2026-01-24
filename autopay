@@ -1,737 +1,490 @@
+#!/usr/bin/env python3
 """
-VIP Premium Bot - Clean & Private Edition
-==========================================
+KkPay Telegram Bot (single file)
 
-Fitur:
-- Privasi terjamin (admin info tersembunyi)
-- Respon singkat & rapi
-- Support Testnet untuk testing
-- UI/UX yang lebih baik
+Required environment variables:
+  - BOT_TOKEN
+  - KKPAY_ID
+  - KKPAY_SECRET
 
-SETUP:
-1. Dapatkan BOT_TOKEN dari @BotFather
-2. Dapatkan CRYPTOPAY_TOKEN dari @CryptoBot -> Crypto Pay -> My Apps
-3. Set USE_TESTNET = True untuk testing (gunakan @CryptoTestnetBot)
-4. Set USE_TESTNET = False untuk production
+Optional environment variables:
+  - KKPAY_BASE_URL (default: https://www.gamepay.tech)
+  - KKPAY_CONTENT_TYPE (default: text/plain)
+  - KKPAY_TIMEOUT (seconds, default: 15)
+  - KKPAY_ALLOW_UNSIGNED (true/false, default: false)
+  - KKPAY_RETURN_URL (used for /pay)
+  - KKPAY_CHECK_WITHDRAW_PATH (default: /api/merchant/checkWithdraw)
+  - KKPAY_CENSOR_USER_PATH (default: /api/merchant/censorUserByTG)
+  - ADMIN_ID (telegram user id for admin commands)
+  - DEFAULT_COIN (default: USDT)
+  - ORDER_PREFIX (default: tg)
 """
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import time
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
+import urllib.error
+import urllib.request
 
 import telebot
 from telebot import types
-import asyncio
-import json
-import os
-from datetime import datetime
-from aiocryptopay import AioCryptoPay, Networks
-from aiocryptopay.const import PaidButtons, CurrencyType
 
-# ══════════════════════════════════════════════════════════════
-# KONFIGURASI UTAMA
-# ══════════════════════════════════════════════════════════════
 
-# Bot Token dari @BotFather
-BOT_TOKEN = '6613883967:AAGNJ7oJQIbWZ-snY_dqy9rGDw_6nXbUrpY'
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+KKPAY_ID = os.getenv("KKPAY_ID", "").strip()
+KKPAY_SECRET = os.getenv("KKPAY_SECRET", "").strip()
 
-# CryptoPay Token
-# TESTNET: Dari @CryptoTestnetBot -> Crypto Pay -> My Apps
-# MAINNET: Dari @CryptoBot -> Crypto Pay -> My Apps
-CRYPTOPAY_TOKEN = '53408:AA2RZsK4Y7gfG13O63eVfAiX0kruSc6gJEv'
+KKPAY_BASE_URL = os.getenv("KKPAY_BASE_URL", "https://www.gamepay.tech").rstrip("/")
+KKPAY_CONTENT_TYPE = os.getenv("KKPAY_CONTENT_TYPE", "text/plain")
+KKPAY_TIMEOUT = int(os.getenv("KKPAY_TIMEOUT", "15"))
+KKPAY_ALLOW_UNSIGNED = os.getenv("KKPAY_ALLOW_UNSIGNED", "false").lower() == "true"
+KKPAY_RETURN_URL = os.getenv("KKPAY_RETURN_URL", "").strip()
 
-# ⚠️ TESTNET MODE - Set True untuk testing, False untuk production
-USE_TESTNET = True
+KKPAY_CHECK_WITHDRAW_PATH = os.getenv(
+    "KKPAY_CHECK_WITHDRAW_PATH", "/api/merchant/checkWithdraw"
+)
+KKPAY_CENSOR_USER_PATH = os.getenv(
+    "KKPAY_CENSOR_USER_PATH", "/api/merchant/censorUserByTG"
+)
 
-# Link Premium Channel (private invite link)
-PREMIUM_LINK = 'https://t.me/+V2JE9sIz35ZmZGNl'
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
+DEFAULT_COIN = os.getenv("DEFAULT_COIN", "USDT").upper()
+ORDER_PREFIX = os.getenv("ORDER_PREFIX", "tg")
 
-# Admin ID (untuk notifikasi internal saja, tidak ditampilkan ke user)
-ADMIN_ID = 6683929810
+ALLOWED_COINS = {"USDT", "TRX", "CNY", "KKCOIN"}
 
-# Pricing
-ORIGINAL_PRICE = 300
-DISCOUNT_PERCENT = 50
-FINAL_PRICE = ORIGINAL_PRICE * (100 - DISCOUNT_PERCENT) / 100
 
-# Database Files
-PREMIUM_DB = 'premium_users.json'
-INVOICES_DB = 'pending_invoices.json'
+def require_env():
+    missing = []
+    if not BOT_TOKEN:
+        missing.append("BOT_TOKEN")
+    if not KKPAY_ID:
+        missing.append("KKPAY_ID")
+    if not KKPAY_SECRET:
+        missing.append("KKPAY_SECRET")
+    if missing:
+        raise SystemExit("Missing required environment variables: " + ", ".join(missing))
 
-# ══════════════════════════════════════════════════════════════
-# INISIALISASI
-# ══════════════════════════════════════════════════════════════
 
-bot = telebot.TeleBot(BOT_TOKEN)
-NETWORK = Networks.TEST_NET if USE_TESTNET else Networks.MAIN_NET
+def normalize_coin(value):
+    coin = value.upper()
+    if coin not in ALLOWED_COINS:
+        raise ValueError(
+            "Unsupported coin. Allowed: " + ", ".join(sorted(ALLOWED_COINS))
+        )
+    return coin
 
-# ══════════════════════════════════════════════════════════════
-# DATABASE HELPERS
-# ══════════════════════════════════════════════════════════════
 
-def load_json(file):
-    """Load data dari JSON file"""
-    if os.path.exists(file):
+def normalize_amount(value):
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError("Invalid amount") from exc
+    if amount <= 0:
+        raise ValueError("Amount must be greater than 0")
+    amount = amount.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    return float(amount)
+
+
+def make_order_id(prefix, user_id):
+    suffix = secrets.token_hex(3)
+    return f"{prefix}-{user_id}-{int(time.time())}-{suffix}"
+
+
+class KkPayError(Exception):
+    pass
+
+
+class KkPayClient:
+    def __init__(
+        self,
+        merchant_id,
+        secret,
+        base_url,
+        content_type="text/plain",
+        timeout=15,
+        allow_unsigned=False,
+        check_withdraw_path="/api/merchant/checkWithdraw",
+        censor_user_path="/api/merchant/censorUserByTG",
+    ):
+        self.merchant_id = merchant_id
+        self.secret = secret
+        self.base_url = base_url.rstrip("/")
+        self.content_type = content_type
+        self.timeout = timeout
+        self.allow_unsigned = allow_unsigned
+        self.check_withdraw_path = check_withdraw_path
+        self.censor_user_path = censor_user_path
+
+    def _sign(self, data_b64):
+        raw = (data_b64 + self.secret).encode("utf-8")
+        digest = hashlib.sha256(raw).digest()
+        return base64.b64encode(digest).decode("ascii")
+
+    def _post(self, path, payload):
+        if not path.startswith("/"):
+            path = "/" + path
+        url = self.base_url + path
+
+        body_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        body_b64 = base64.b64encode(body_json.encode("utf-8")).decode("ascii")
+        signature = self._sign(body_b64)
+
+        req = urllib.request.Request(
+            url,
+            data=body_b64.encode("utf-8"),
+            method="POST",
+        )
+        req.add_header("Content-Type", self.content_type)
+        req.add_header("KKPAY-ID", self.merchant_id)
+        req.add_header("KKPAY-SIGN", signature)
+
         try:
-            with open(file, 'r') as f:
-                return json.load(f)
-        except:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace").strip()
+                resp_sign = resp.headers.get("KKPAY-SIGN", "").strip()
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+            raise KkPayError(f"HTTP {exc.code}: {body or exc.reason}")
+        except Exception as exc:
+            raise KkPayError(str(exc))
+
+        return self._parse_response(body, resp_sign)
+
+    def _parse_response(self, body, resp_sign):
+        if body == "Oops":
+            raise KkPayError("IP not whitelisted (Oops)")
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            raise KkPayError(f"Invalid JSON response: {body[:200]}")
+
+        code = payload.get("code")
+        try:
+            code_int = int(code)
+        except (TypeError, ValueError):
+            code_int = None
+
+        message = payload.get("message", "")
+        if code_int not in (10000, 1000):
+            raise KkPayError(message or f"API error code {code}")
+
+        data = payload.get("data")
+        if data is None:
             return {}
-    return {}
+        if isinstance(data, (dict, list)):
+            return data
+        if not isinstance(data, str):
+            raise KkPayError("Unexpected data format in response")
+
+        if resp_sign:
+            expected = self._sign(data)
+            if not hmac.compare_digest(expected, resp_sign):
+                raise KkPayError("Response signature verification failed")
+        elif not self.allow_unsigned:
+            raise KkPayError("Missing response signature")
 
-def save_json(file, data):
-    """Simpan data ke JSON file"""
-    with open(file, 'w') as f:
-        json.dump(data, f, indent=2)
-
-# Premium Users
-def is_premium(user_id):
-    return str(user_id) in load_json(PREMIUM_DB)
-
-def get_premium_data(user_id):
-    return load_json(PREMIUM_DB).get(str(user_id))
-
-def add_premium(user_id, invoice_id):
-    data = load_json(PREMIUM_DB)
-    data[str(user_id)] = {
-        'invoice_id': invoice_id,
-        'activated': datetime.now().isoformat(),
-        'amount': FINAL_PRICE
-    }
-    save_json(PREMIUM_DB, data)
-
-# Pending Invoices
-def get_invoice(user_id):
-    return load_json(INVOICES_DB).get(str(user_id))
-
-def save_invoice(user_id, invoice_id, url):
-    data = load_json(INVOICES_DB)
-    data[str(user_id)] = {
-        'id': invoice_id,
-        'url': url,
-        'created': datetime.now().isoformat()
-    }
-    save_json(INVOICES_DB, data)
-
-def remove_invoice(user_id):
-    data = load_json(INVOICES_DB)
-    if str(user_id) in data:
-        del data[str(user_id)]
-        save_json(INVOICES_DB, data)
-
-# ══════════════════════════════════════════════════════════════
-# CRYPTOPAY FUNCTIONS
-# ══════════════════════════════════════════════════════════════
-
-async def create_invoice(user_id):
-    """Buat invoice pembayaran"""
-    crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=NETWORK)
-    
-    try:
-        bot_info = bot.get_me().username
-        invoice = await crypto.create_invoice(
-            amount=FINAL_PRICE,
-            fiat='USD',
-            currency_type=CurrencyType.FIAT,
-            description='VIP Premium Lifetime',
-            paid_btn_name=PaidButtons.CALLBACK,
-            paid_btn_url=f'https://t.me/{bot_info}?start=paid',
-            payload=str(user_id),
-            allow_comments=False,
-            allow_anonymous=True  # Privasi user
-        )
-        return invoice
-    finally:
-        await crypto.close()
-
-async def check_invoice(invoice_id):
-    """Cek status invoice"""
-    crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=NETWORK)
-    
-    try:
-        invoices = await crypto.get_invoices(invoice_ids=[invoice_id])
-        return invoices[0] if invoices else None
-    finally:
-        await crypto.close()
-
-async def get_app_info():
-    """Get CryptoPay app info"""
-    crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=NETWORK)
-    
-    try:
-        return await crypto.get_me()
-    finally:
-        await crypto.close()
-
-def run_async(coro):
-    """Helper async runner"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    except Exception as e:
-        raise e
-
-# ══════════════════════════════════════════════════════════════
-# MESSAGE TEMPLATES (Singkat & Rapi)
-# ══════════════════════════════════════════════════════════════
-
-def msg_welcome():
-    """Pesan welcome untuk user baru"""
-    mode = "🧪 TESTNET" if USE_TESTNET else "🔐 SECURE"
-    return f"""
-🎬 *VIP Premium Bot* {mode}
-
-Akses *10.000+ video premium* berkualitas tinggi!
-
-✨ *Keuntungan:*
-• Akses eksklusif seumur hidup
-• Update harian & privasi 100%
-
-💰 *Harga:* ~~${ORIGINAL_PRICE}~~ → *${int(FINAL_PRICE)}* (-{DISCOUNT_PERCENT}%)
-"""
-
-def msg_welcome_premium():
-    """Pesan untuk member premium"""
-    return """
-🎉 *Welcome Back, VIP!*
-
-Status: ✅ *PREMIUM LIFETIME*
-
-Klik tombol untuk akses konten 👇
-"""
-
-def msg_invoice(invoice_id):
-    """Pesan invoice pembayaran"""
-    mode = "🧪 Mode: TESTNET" if USE_TESTNET else ""
-    return f"""
-💳 *Invoice Pembayaran*
-
-📦 VIP Premium Lifetime
-💵 Total: *${int(FINAL_PRICE)}*
-🔢 ID: `{invoice_id}`
-{mode}
-
-*Cara Bayar:*
-1️⃣ Klik "Bayar Sekarang"
-2️⃣ Pilih crypto & bayar
-3️⃣ Klik "Verifikasi" setelah bayar
-
-⏰ Berlaku 60 menit
-"""
-
-def msg_success(invoice_id):
-    """Pesan pembayaran sukses"""
-    return f"""
-✅ *Pembayaran Berhasil!*
-
-🎉 Selamat! Kamu sekarang *VIP Member*
-⏰ Durasi: *LIFETIME*
-
-Klik tombol untuk akses premium 👇
-"""
-
-def msg_pending(invoice_id):
-    """Pesan menunggu pembayaran"""
-    return f"""
-⏳ *Menunggu Pembayaran*
-
-🔢 Invoice: `{invoice_id}`
-📊 Status: Belum dibayar
-
-Selesaikan pembayaran terlebih dahulu.
-"""
-
-def msg_expired():
-    """Pesan invoice expired"""
-    return """
-⌛ *Invoice Kadaluarsa*
-
-Buat invoice baru untuk melanjutkan.
-"""
-
-def msg_error():
-    """Pesan error"""
-    return """
-❌ *Terjadi Kesalahan*
-
-Coba lagi atau hubungi support.
-"""
-
-def msg_cancelled():
-    """Pesan dibatalkan"""
-    return """
-🚫 *Dibatalkan*
-
-Ketik /start untuk memulai kembali.
-"""
-
-def msg_status_free():
-    """Status user free"""
-    return f"""
-📊 *Status Keanggotaan*
-
-🔓 Status: *FREE*
-
-Upgrade ke Premium:
-• 10.000+ video
-• Akses lifetime
-• Hanya *${int(FINAL_PRICE)}*
-"""
-
-def msg_status_premium(data):
-    """Status user premium"""
-    date = data['activated'][:10]
-    return f"""
-📊 *Status Keanggotaan*
-
-✅ Status: *PREMIUM*
-📅 Sejak: {date}
-⏰ Durasi: *LIFETIME*
-"""
-
-def msg_help():
-    """Pesan bantuan"""
-    return """
-📚 *Bantuan*
-
-/start - Menu utama
-/status - Cek keanggotaan
-/help - Bantuan
-
-*Cara Beli:*
-1. Klik "Beli Premium"
-2. Bayar dengan crypto
-3. Verifikasi pembayaran
-4. Akses premium!
-
-*Pembayaran:*
-USDT • TON • BTC • ETH • dll
-"""
-
-# ══════════════════════════════════════════════════════════════
-# KEYBOARDS
-# ══════════════════════════════════════════════════════════════
-
-def kb_main():
-    """Keyboard menu utama"""
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("💎 Beli Premium", callback_data='buy'),
-        types.InlineKeyboardButton("📊 Status", callback_data='status'),
-        types.InlineKeyboardButton("❓ Bantuan", callback_data='help')
-    )
-    return kb
-
-def kb_premium():
-    """Keyboard untuk premium user"""
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("🔓 Akses Premium", url=PREMIUM_LINK),
-        types.InlineKeyboardButton("📊 Status", callback_data='status')
-    )
-    return kb
-
-def kb_invoice(invoice_url, invoice_id):
-    """Keyboard invoice"""
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("💰 Bayar Sekarang", url=invoice_url),
-        types.InlineKeyboardButton("✅ Verifikasi", callback_data=f'verify_{invoice_id}'),
-        types.InlineKeyboardButton("❌ Batal", callback_data='cancel')
-    )
-    return kb
-
-def kb_pending(invoice_url, invoice_id):
-    """Keyboard pending payment"""
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("💰 Bayar", url=invoice_url),
-        types.InlineKeyboardButton("🔄 Cek Ulang", callback_data=f'verify_{invoice_id}')
-    )
-    return kb
-
-def kb_success():
-    """Keyboard sukses"""
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔓 Akses Premium", url=PREMIUM_LINK))
-    return kb
-
-def kb_retry():
-    """Keyboard retry"""
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("🔄 Coba Lagi", callback_data='buy'),
-        types.InlineKeyboardButton("🏠 Menu", callback_data='menu')
-    )
-    return kb
-
-def kb_back():
-    """Keyboard back"""
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🏠 Menu Utama", callback_data='menu'))
-    return kb
-
-def kb_status_free():
-    """Keyboard status free"""
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("💎 Upgrade Premium", callback_data='buy'),
-        types.InlineKeyboardButton("🏠 Menu", callback_data='menu')
-    )
-    return kb
-
-# ══════════════════════════════════════════════════════════════
-# BOT HANDLERS
-# ══════════════════════════════════════════════════════════════
-
-@bot.message_handler(commands=['start'])
-def cmd_start(message):
-    """Handle /start command"""
-    user_id = message.from_user.id
-    args = message.text.split()
-    
-    # Deep link handler
-    if len(args) > 1:
-        if args[1] == 'paid' or args[1].startswith('paid_'):
-            pending = get_invoice(user_id)
-            if pending:
-                verify_payment(message.chat.id, pending['id'], user_id)
-                return
-    
-    # Check premium status
-    if is_premium(user_id):
-        bot.send_message(
-            message.chat.id,
-            msg_welcome_premium(),
-            parse_mode='Markdown',
-            reply_markup=kb_premium()
-        )
-    else:
-        bot.send_message(
-            message.chat.id,
-            msg_welcome(),
-            parse_mode='Markdown',
-            reply_markup=kb_main()
-        )
-
-@bot.message_handler(commands=['status'])
-def cmd_status(message):
-    """Handle /status command"""
-    show_status(message.chat.id, message.from_user.id)
-
-@bot.message_handler(commands=['help'])
-def cmd_help(message):
-    """Handle /help command"""
-    bot.send_message(
-        message.chat.id,
-        msg_help(),
-        parse_mode='Markdown',
-        reply_markup=kb_back()
-    )
-
-# ══════════════════════════════════════════════════════════════
-# CALLBACK HANDLERS
-# ══════════════════════════════════════════════════════════════
-
-@bot.callback_query_handler(func=lambda c: c.data == 'menu')
-def cb_menu(call):
-    """Back to menu"""
-    user_id = call.from_user.id
-    
-    if is_premium(user_id):
-        bot.edit_message_text(
-            msg_welcome_premium(),
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown',
-            reply_markup=kb_premium()
-        )
-    else:
-        bot.edit_message_text(
-            msg_welcome(),
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown',
-            reply_markup=kb_main()
-        )
-    bot.answer_callback_query(call.id)
-
-@bot.callback_query_handler(func=lambda c: c.data == 'buy')
-def cb_buy(call):
-    """Handle buy premium"""
-    user_id = call.from_user.id
-    
-    if is_premium(user_id):
-        bot.answer_callback_query(call.id, "✅ Kamu sudah premium!", show_alert=True)
-        return
-    
-    bot.answer_callback_query(call.id, "⏳ Membuat invoice...")
-    
-    try:
-        bot.edit_message_text(
-            "⏳ *Membuat invoice...*",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown'
-        )
-    except:
-        pass
-    
-    try:
-        invoice = run_async(create_invoice(user_id))
-        save_invoice(user_id, invoice.invoice_id, invoice.bot_invoice_url)
-        
-        bot.edit_message_text(
-            msg_invoice(invoice.invoice_id),
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown',
-            reply_markup=kb_invoice(invoice.bot_invoice_url, invoice.invoice_id)
-        )
-        
-    except Exception as e:
-        print(f"Error creating invoice: {e}")
-        bot.edit_message_text(
-            msg_error(),
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown',
-            reply_markup=kb_retry()
-        )
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith('verify_'))
-def cb_verify(call):
-    """Verify payment"""
-    invoice_id = call.data.replace('verify_', '')
-    user_id = call.from_user.id
-    
-    bot.answer_callback_query(call.id, "🔍 Memeriksa pembayaran...")
-    verify_payment(call.message.chat.id, invoice_id, user_id, call.message.message_id)
-
-@bot.callback_query_handler(func=lambda c: c.data == 'status')
-def cb_status(call):
-    """Show status"""
-    show_status(call.message.chat.id, call.from_user.id, call.message.message_id)
-    bot.answer_callback_query(call.id)
-
-@bot.callback_query_handler(func=lambda c: c.data == 'help')
-def cb_help(call):
-    """Show help"""
-    bot.edit_message_text(
-        msg_help(),
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='Markdown',
-        reply_markup=kb_back()
-    )
-    bot.answer_callback_query(call.id)
-
-@bot.callback_query_handler(func=lambda c: c.data == 'cancel')
-def cb_cancel(call):
-    """Cancel payment"""
-    bot.edit_message_text(
-        msg_cancelled(),
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='Markdown',
-        reply_markup=kb_back()
-    )
-    bot.answer_callback_query(call.id)
-
-# ══════════════════════════════════════════════════════════════
-# HELPER FUNCTIONS
-# ══════════════════════════════════════════════════════════════
-
-def verify_payment(chat_id, invoice_id, user_id, msg_id=None):
-    """Verify payment status"""
-    try:
-        invoice = run_async(check_invoice(int(invoice_id)))
-        
-        if not invoice:
-            text = msg_error()
-            kb = kb_retry()
-        elif invoice.status == 'paid':
-            # Payment successful!
-            if not is_premium(user_id):
-                add_premium(user_id, invoice_id)
-            remove_invoice(user_id)
-            
-            text = msg_success(invoice_id)
-            kb = kb_success()
-            
-            # Notify admin (internal, no user info exposed)
-            notify_admin(user_id, invoice_id)
-            
-        elif invoice.status == 'active':
-            text = msg_pending(invoice_id)
-            kb = kb_pending(invoice.bot_invoice_url, invoice_id)
-        else:
-            # Expired or cancelled
-            text = msg_expired()
-            kb = kb_retry()
-        
-        if msg_id:
-            bot.edit_message_text(
-                text, chat_id, msg_id,
-                parse_mode='Markdown',
-                reply_markup=kb
-            )
-        else:
-            bot.send_message(
-                chat_id, text,
-                parse_mode='Markdown',
-                reply_markup=kb
-            )
-            
-    except Exception as e:
-        print(f"Error verifying: {e}")
-        if msg_id:
-            bot.edit_message_text(
-                msg_error(), chat_id, msg_id,
-                parse_mode='Markdown',
-                reply_markup=kb_retry()
-            )
-        else:
-            bot.send_message(
-                chat_id, msg_error(),
-                parse_mode='Markdown',
-                reply_markup=kb_retry()
-            )
-
-def show_status(chat_id, user_id, msg_id=None):
-    """Show membership status"""
-    if is_premium(user_id):
-        data = get_premium_data(user_id)
-        text = msg_status_premium(data)
-        kb = kb_premium()
-    else:
-        text = msg_status_free()
-        kb = kb_status_free()
-    
-    if msg_id:
-        bot.edit_message_text(
-            text, chat_id, msg_id,
-            parse_mode='Markdown',
-            reply_markup=kb
-        )
-    else:
-        bot.send_message(
-            chat_id, text,
-            parse_mode='Markdown',
-            reply_markup=kb
-        )
-
-def notify_admin(user_id, invoice_id):
-    """Notify admin about new payment (private, no user data exposed to users)"""
-    try:
-        # Internal notification only
-        text = f"""
-🔔 *Pembayaran Baru*
-
-💰 ${int(FINAL_PRICE)}
-🔢 Invoice: `{invoice_id}`
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
-"""
-        bot.send_message(ADMIN_ID, text, parse_mode='Markdown')
-    except:
-        pass
-
-# ══════════════════════════════════════════════════════════════
-# ADMIN COMMANDS (Hidden from regular users)
-# ══════════════════════════════════════════════════════════════
-
-@bot.message_handler(commands=['admin'])
-def cmd_admin(message):
-    """Admin panel"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    users = load_json(PREMIUM_DB)
-    total = len(users)
-    revenue = sum(u.get('amount', 0) for u in users.values())
-    mode = "🧪 TESTNET" if USE_TESTNET else "🔐 MAINNET"
-    
-    text = f"""
-🔧 *Admin Panel*
-
-{mode}
-👥 Premium: {total}
-💰 Revenue: ${revenue}
-💵 Price: ${int(FINAL_PRICE)}
-
-/testapi - Test CryptoPay
-/broadcast <msg> - Broadcast
-"""
-    bot.send_message(message.chat.id, text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['testapi'])
-def cmd_testapi(message):
-    """Test CryptoPay API"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    bot.reply_to(message, "🔄 Testing API...")
-    
-    try:
-        info = run_async(get_app_info())
-        mode = "TESTNET" if USE_TESTNET else "MAINNET"
-        text = f"""
-✅ *API Connected*
-
-📱 App: {info.name}
-🌐 Network: {mode}
-"""
-        bot.send_message(message.chat.id, text, parse_mode='Markdown')
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Error: {str(e)[:100]}")
-
-@bot.message_handler(commands=['broadcast'])
-def cmd_broadcast(message):
-    """Broadcast message to all premium users"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    text = message.text.replace('/broadcast', '').strip()
-    if not text:
-        bot.reply_to(message, "Usage: /broadcast <message>")
-        return
-    
-    users = load_json(PREMIUM_DB)
-    sent = 0
-    
-    for uid in users.keys():
         try:
-            bot.send_message(int(uid), f"📢 *Pengumuman*\n\n{text}", parse_mode='Markdown')
-            sent += 1
-        except:
-            pass
-    
-    bot.reply_to(message, f"✅ Broadcast sent to {sent}/{len(users)} users")
+            decoded = base64.b64decode(data).decode("utf-8")
+            return json.loads(decoded)
+        except Exception as exc:
+            raise KkPayError(f"Failed to decode response data: {exc}")
 
-# ══════════════════════════════════════════════════════════════
-# DEFAULT HANDLER
-# ══════════════════════════════════════════════════════════════
+    def pay_link(self, payload):
+        return self._post("/merchant/payLink", payload)
 
-@bot.message_handler(func=lambda m: True)
+    def create_withdraw_order(self, payload):
+        return self._post("/merchant/createWithdrawOrder", payload)
+
+    def check_deposit(self, txid):
+        return self._post("/merchant/checkDeposit", {"txid": txid})
+
+    def check_withdraw(self, txid):
+        return self._post(self.check_withdraw_path, {"txid": txid})
+
+    def censor_user_by_tg(self, tg_id):
+        return self._post(self.censor_user_path, {"tg_id": tg_id})
+
+
+def is_admin(user_id):
+    return ADMIN_ID and user_id == ADMIN_ID
+
+
+def safe_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs), None
+    except KkPayError as exc:
+        return None, str(exc)
+    except Exception as exc:
+        return None, f"Unexpected error: {exc}"
+
+
+def get_value(data, *keys):
+    for key in keys:
+        if key in data:
+            return data.get(key)
+    return ""
+
+
+def format_deposit_status(data):
+    currency = get_value(data, "currency", "coin")
+    status = get_value(data, "statusText", "orderStatus")
+    pay_user = get_value(data, "payUser", "pay_user")
+    lines = [
+        "Deposit status",
+        f"txid: {data.get('txid', '')}",
+        f"amount: {data.get('amount', '')}",
+        f"currency: {currency}",
+        f"fee: {data.get('fee', '')}",
+        f"status: {status}",
+    ]
+    if pay_user:
+        lines.append(f"pay_user: {pay_user}")
+    if "name" in data:
+        lines.append(f"name: {data.get('name', '')}")
+    return "\n".join(lines)
+
+
+def format_withdraw_status(data):
+    currency = get_value(data, "currency", "coin")
+    status = get_value(data, "orderStatus", "statusText")
+    to_user_id = get_value(data, "to_user_id", "toUserId")
+    lines = [
+        "Withdraw status",
+        f"txid: {data.get('txid', '')}",
+        f"amount: {data.get('amount', '')}",
+        f"currency: {currency}",
+        f"fee: {data.get('fee', '')}",
+        f"status: {status}",
+    ]
+    if "userOrder" in data:
+        lines.append(f"user_order: {data.get('userOrder', '')}")
+    if to_user_id:
+        lines.append(f"to_user_id: {to_user_id}")
+    if "name" in data:
+        lines.append(f"name: {data.get('name', '')}")
+    return "\n".join(lines)
+
+
+def format_user_check(data):
+    return f"tg_id: {data.get('tg_id', '')}\nexists: {data.get('isExist', '')}"
+
+
+HELP_TEXT = (
+    "KkPay bot ready.\n"
+    "\n"
+    "Commands:\n"
+    "/pay <amount> [coin] [order_id]\n"
+    "/check_deposit <txid>\n"
+    "/withdraw <amount> <coin> <tg_id> [order_id] [note] (admin only)\n"
+    "/check_withdraw <txid> (admin only)\n"
+    "/check_user <tg_id> (admin only)\n"
+    "\n"
+    "Allowed coins: USDT, TRX, CNY, KKCOIN\n"
+)
+
+
+require_env()
+bot = telebot.TeleBot(BOT_TOKEN)
+client = KkPayClient(
+    merchant_id=KKPAY_ID,
+    secret=KKPAY_SECRET,
+    base_url=KKPAY_BASE_URL,
+    content_type=KKPAY_CONTENT_TYPE,
+    timeout=KKPAY_TIMEOUT,
+    allow_unsigned=KKPAY_ALLOW_UNSIGNED,
+    check_withdraw_path=KKPAY_CHECK_WITHDRAW_PATH,
+    censor_user_path=KKPAY_CENSOR_USER_PATH,
+)
+
+
+@bot.message_handler(commands=["start", "help"])
+def cmd_help(message):
+    bot.reply_to(message, HELP_TEXT)
+
+
+@bot.message_handler(commands=["pay"])
+def cmd_pay(message):
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "Usage: /pay <amount> [coin] [order_id]")
+        return
+
+    amount_text = args[1]
+    coin_text = args[2] if len(args) > 2 else DEFAULT_COIN
+    order_id = args[3] if len(args) > 3 else make_order_id(ORDER_PREFIX, message.from_user.id)
+
+    try:
+        amount = normalize_amount(amount_text)
+        coin = normalize_coin(coin_text)
+    except ValueError as exc:
+        bot.reply_to(message, f"Input error: {exc}")
+        return
+
+    payload = {"userOrder": order_id, "amount": amount, "coin": coin}
+    if KKPAY_RETURN_URL:
+        payload["return_url"] = KKPAY_RETURN_URL
+
+    data, error = safe_call(client.pay_link, payload)
+    if error:
+        bot.reply_to(message, f"Error: {error}")
+        return
+
+    txid = data.get("txid", "")
+    pay_url = get_value(data, "pay_url", "payUrl")
+    currency = get_value(data, "currency", "coin") or coin
+    reply_lines = [
+        "Payment link created",
+        f"user_order: {order_id}",
+        f"txid: {txid}",
+        f"amount: {data.get('amount', amount)}",
+        f"currency: {currency}",
+        f"fee: {data.get('fee', '')}",
+        f"pay_url: {pay_url}",
+    ]
+
+    kb = types.InlineKeyboardMarkup()
+    if txid:
+        kb.add(
+            types.InlineKeyboardButton(
+                "Check payment", callback_data=f"checkdep:{txid}"
+            )
+        )
+    bot.send_message(message.chat.id, "\n".join(reply_lines), reply_markup=kb)
+
+
+@bot.message_handler(commands=["check_deposit"])
+def cmd_check_deposit(message):
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "Usage: /check_deposit <txid>")
+        return
+    txid = args[1]
+
+    data, error = safe_call(client.check_deposit, txid)
+    if error:
+        bot.reply_to(message, f"Error: {error}")
+        return
+    bot.reply_to(message, format_deposit_status(data))
+
+
+@bot.message_handler(commands=["withdraw"])
+def cmd_withdraw(message):
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, "Admin only command.")
+        return
+
+    args = message.text.split()
+    if len(args) < 4:
+        bot.reply_to(message, "Usage: /withdraw <amount> <coin> <tg_id> [order_id] [note]")
+        return
+
+    amount_text = args[1]
+    coin_text = args[2]
+    tg_id_text = args[3]
+    order_id = args[4] if len(args) > 4 else make_order_id("wd", tg_id_text)
+    note = " ".join(args[5:]) if len(args) > 5 else ""
+
+    try:
+        amount = normalize_amount(amount_text)
+        coin = normalize_coin(coin_text)
+        tg_id = int(tg_id_text)
+    except (ValueError, TypeError) as exc:
+        bot.reply_to(message, f"Input error: {exc}")
+        return
+
+    payload = {
+        "userOrder": order_id,
+        "amount": amount,
+        "coin": coin,
+        "to_user_id": tg_id,
+    }
+    if note:
+        payload["name"] = note
+
+    data, error = safe_call(client.create_withdraw_order, payload)
+    if error:
+        bot.reply_to(message, f"Error: {error}")
+        return
+
+    reply_lines = [
+        "Withdraw order created",
+        f"user_order: {order_id}",
+        f"txid: {data.get('txid', '')}",
+        f"amount: {data.get('amount', amount)}",
+        f"currency: {data.get('currency', coin)}",
+        f"fee: {data.get('fee', '')}",
+    ]
+    bot.reply_to(message, "\n".join(reply_lines))
+
+
+@bot.message_handler(commands=["check_withdraw"])
+def cmd_check_withdraw(message):
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, "Admin only command.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "Usage: /check_withdraw <txid>")
+        return
+    txid = args[1]
+
+    data, error = safe_call(client.check_withdraw, txid)
+    if error:
+        bot.reply_to(message, f"Error: {error}")
+        return
+    bot.reply_to(message, format_withdraw_status(data))
+
+
+@bot.message_handler(commands=["check_user"])
+def cmd_check_user(message):
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, "Admin only command.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "Usage: /check_user <tg_id>")
+        return
+    tg_id = args[1]
+
+    data, error = safe_call(client.censor_user_by_tg, tg_id)
+    if error:
+        bot.reply_to(message, f"Error: {error}")
+        return
+    bot.reply_to(message, format_user_check(data))
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("checkdep:"))
+def cb_check_deposit(call):
+    txid = call.data.split(":", 1)[1]
+    data, error = safe_call(client.check_deposit, txid)
+    if error:
+        bot.answer_callback_query(call.id, "Check failed", show_alert=True)
+        bot.send_message(call.message.chat.id, f"Error: {error}")
+        return
+
+    bot.answer_callback_query(call.id, "Status updated")
+    bot.send_message(call.message.chat.id, format_deposit_status(data))
+
+
+@bot.message_handler(func=lambda _: True)
 def default_handler(message):
-    """Handle unknown messages"""
-    bot.reply_to(
-        message,
-        "Ketik /start untuk memulai 👆",
-        parse_mode='Markdown'
-    )
+    bot.reply_to(message, "Unknown command. Use /help for instructions.")
 
-# ══════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════
 
-if __name__ == '__main__':
-    mode = "🧪 TESTNET MODE" if USE_TESTNET else "🔐 PRODUCTION MODE"
-    
-    print("═" * 40)
-    print("🤖 VIP Premium Bot")
-    print("═" * 40)
-    print(f"Mode: {mode}")
-    print(f"Price: ${int(FINAL_PRICE)} (was ${ORIGINAL_PRICE})")
-    print("═" * 40)
-    print("Bot running...")
-    print("═" * 40)
-    
+if __name__ == "__main__":
+    print("Starting KkPay bot")
+    print(f"Base URL: {KKPAY_BASE_URL}")
+    print(f"Merchant ID: {KKPAY_ID}")
+    print(f"Default coin: {DEFAULT_COIN}")
+    if ADMIN_ID:
+        print(f"Admin ID: {ADMIN_ID}")
+    else:
+        print("Admin commands disabled (ADMIN_ID not set)")
     bot.infinity_polling()
