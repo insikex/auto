@@ -1,18 +1,21 @@
 """
-VIP Premium Bot - Clean & Private Edition
-==========================================
+VIP Premium Bot - Multi Payment Gateway Edition
+================================================
 
 Fitur:
 - Privasi terjamin (admin info tersembunyi)
 - Respon singkat & rapi
 - Support Testnet untuk testing
 - UI/UX yang lebih baik
+- Multi Payment Gateway: CryptoPay, KkPay, OkayPay
 
 SETUP:
 1. Dapatkan BOT_TOKEN dari @BotFather
 2. Dapatkan CRYPTOPAY_TOKEN dari @CryptoBot -> Crypto Pay -> My Apps
-3. Set USE_TESTNET = True untuk testing (gunakan @CryptoTestnetBot)
-4. Set USE_TESTNET = False untuk production
+3. Set KKPAY_ID dan KKPAY_SECRET dari KkPay merchant panel
+4. Set OKAYPAY_ID dan OKAYPAY_TOKEN dari OkayPay merchant panel
+5. Set USE_TESTNET = True untuk testing (gunakan @CryptoTestnetBot)
+6. Set USE_TESTNET = False untuk production
 """
 
 import telebot
@@ -20,7 +23,11 @@ from telebot import types
 import asyncio
 import json
 import os
+import requests
+import hashlib
+import base64
 from datetime import datetime
+from urllib.parse import urlencode
 from aiocryptopay import AioCryptoPay, Networks
 from aiocryptopay.const import PaidButtons, CurrencyType
 
@@ -36,6 +43,16 @@ BOT_TOKEN = '6613883967:AAGNJ7oJQIbWZ-snY_dqy9rGDw_6nXbUrpY'
 # MAINNET: Dari @CryptoBot -> Crypto Pay -> My Apps
 CRYPTOPAY_TOKEN = '53408:AA2RZsK4Y7gfG13O63eVfAiX0kruSc6gJEv'
 
+# KkPay Configuration
+# Dapatkan dari https://www.gamepay.tech merchant panel
+KKPAY_ID = 'YOUR_KKPAY_ID'
+KKPAY_SECRET = 'YOUR_KKPAY_SECRET'
+
+# OkayPay Configuration
+# Dapatkan dari https://okaypay.me merchant panel
+OKAYPAY_ID = 'YOUR_OKAYPAY_ID'
+OKAYPAY_TOKEN = 'YOUR_OKAYPAY_TOKEN'
+
 # ⚠️ TESTNET MODE - Set True untuk testing, False untuk production
 USE_TESTNET = True
 
@@ -50,9 +67,353 @@ ORIGINAL_PRICE = 300
 DISCOUNT_PERCENT = 50
 FINAL_PRICE = ORIGINAL_PRICE * (100 - DISCOUNT_PERCENT) / 100
 
+# Default Coin for KkPay & OkayPay
+DEFAULT_COIN = 'USDT'
+
 # Database Files
 PREMIUM_DB = 'premium_users.json'
 INVOICES_DB = 'pending_invoices.json'
+
+# ══════════════════════════════════════════════════════════════
+# KKPAY PAYMENT GATEWAY CLASS
+# ══════════════════════════════════════════════════════════════
+
+class KkPay:
+    """
+    KkPay Payment Gateway
+    API URL: https://www.gamepay.tech/merchant/
+    """
+    
+    def __init__(self, merchant_id: str, secret: str):
+        self.id = merchant_id
+        self.secret = secret
+        self.api_url = 'https://www.gamepay.tech/merchant/'
+        self.api_url_paylink = self.api_url + 'payLink'
+        self.api_url_withdraw = self.api_url + 'createWithdrawOrder'
+    
+    def sign(self, data: str) -> str:
+        """
+        Generate signature for data
+        Args:
+            data: base64 encoded JSON string
+        Returns:
+            Base64 encoded SHA256 hash
+        """
+        message = data + self.secret
+        hash_bytes = hashlib.sha256(message.encode('utf-8')).digest()
+        signature = base64.b64encode(hash_bytes).decode('utf-8')
+        return signature
+    
+    def check_sign(self, data: str, received_signature: str) -> bool:
+        """
+        Verify signature
+        Args:
+            data: base64 encoded data
+            received_signature: signature to verify
+        Returns:
+            True if signature is valid
+        """
+        expected_signature = self.sign(data)
+        return expected_signature == received_signature
+    
+    def pay_link(self, amount: float, coin: str = 'USDT', unique_id: str = None, 
+                 name: str = None, return_url: str = None) -> dict:
+        """
+        Create payment link
+        Args:
+            amount: Payment amount (required)
+            coin: Currency type - USDT or TRX (required)
+            unique_id: Unique order ID (optional)
+            name: Display name (optional)
+            return_url: Return URL after payment (optional)
+        Returns:
+            dict with status and payment data
+        """
+        data = {
+            'amount': amount,
+            'coin': coin
+        }
+        if unique_id:
+            data['unique_id'] = unique_id
+        if name:
+            data['name'] = name
+        if return_url:
+            data['return_url'] = return_url
+        
+        return self._post(self.api_url_paylink, data)
+    
+    def create_withdraw_order(self, amount: float, to_user_id: int, coin: str = 'USDT',
+                              unique_id: str = None, name: str = None) -> dict:
+        """
+        Create withdrawal order to transfer to user
+        Args:
+            amount: Amount to transfer (required)
+            to_user_id: Telegram user ID (required)
+            coin: Currency type - USDT or TRX (required)
+            unique_id: Unique order ID (optional)
+            name: Display name (optional)
+        Returns:
+            dict with status and transfer data
+        """
+        data = {
+            'amount': amount,
+            'to_user_id': to_user_id,
+            'coin': coin
+        }
+        if unique_id:
+            data['unique_id'] = unique_id
+        if name:
+            data['name'] = name
+        
+        return self._post(self.api_url_withdraw, data)
+    
+    def _post(self, url: str, data: dict) -> dict:
+        """
+        Send POST request to API
+        Args:
+            url: API endpoint URL
+            data: Request data
+        Returns:
+            dict with status and response data
+        """
+        try:
+            # Encode data to base64
+            json_data = json.dumps(data)
+            b64_data = base64.b64encode(json_data.encode('utf-8')).decode('utf-8')
+            sign = self.sign(b64_data)
+            
+            headers = {
+                'Content-Type': 'text/plain',
+                'KKPAY-SIGN': sign,
+                'KKPAY-ID': self.id,
+                'User-Agent': 'HTTP CLIENT'
+            }
+            
+            response = requests.post(url, data=b64_data, headers=headers, timeout=10)
+            
+            # Get signature from response headers
+            response_sign = response.headers.get('KKPAY-SIGN', '')
+            
+            # Parse response
+            if response.text == 'Oops':
+                return {
+                    'status': False,
+                    'message': 'IP whitelist error'
+                }
+            
+            result = response.json()
+            
+            if result.get('code') == 10000:
+                response_data = result.get('data', '')
+                
+                # Verify response signature if present
+                if response_sign and response_data:
+                    if not self.check_sign(response_data, response_sign):
+                        return {
+                            'status': False,
+                            'message': 'Signature verification failed'
+                        }
+                
+                # Decode response data
+                if response_data:
+                    decoded_data = json.loads(base64.b64decode(response_data).decode('utf-8'))
+                    return {
+                        'status': True,
+                        'data': decoded_data
+                    }
+                
+                return {'status': True, 'data': result}
+            else:
+                return {
+                    'status': False,
+                    'message': result.get('message', 'Unknown error')
+                }
+                
+        except requests.exceptions.Timeout:
+            return {'status': False, 'message': 'Request timeout'}
+        except requests.exceptions.RequestException as e:
+            return {'status': False, 'message': f'Request error: {str(e)}'}
+        except json.JSONDecodeError:
+            return {'status': False, 'message': 'Invalid JSON response'}
+        except Exception as e:
+            return {'status': False, 'message': f'Error: {str(e)}'}
+
+
+# ══════════════════════════════════════════════════════════════
+# OKAYPAY PAYMENT GATEWAY CLASS
+# ══════════════════════════════════════════════════════════════
+
+class OkayPay:
+    """
+    OkayPay Payment Gateway
+    API URL: https://api.okaypay.me/shop/
+    """
+    
+    def __init__(self, merchant_id: str, token: str):
+        self.id = merchant_id
+        self.token = token
+        self.api_url = 'https://api.okaypay.me/shop/'
+        self.api_url_paylink = self.api_url + 'payLink'
+        self.api_url_transfer = self.api_url + 'transfer'
+        self.api_url_history = self.api_url + 'TransactionHistory'
+    
+    def sign(self, data: dict) -> dict:
+        """
+        Generate signature for data
+        Args:
+            data: Request data dict
+        Returns:
+            Data dict with added id and sign
+        """
+        data = data.copy()
+        data['id'] = self.id
+        
+        # Remove empty values
+        data = {k: v for k, v in data.items() if v is not None and v != ''}
+        
+        # Sort by key
+        sorted_data = dict(sorted(data.items()))
+        
+        # Build query string and add token
+        query_string = urlencode(sorted_data) + '&token=' + self.token
+        
+        # Calculate MD5 hash
+        sign = hashlib.md5(query_string.encode('utf-8')).hexdigest().upper()
+        sorted_data['sign'] = sign
+        
+        return sorted_data
+    
+    def check_sign(self, data: dict) -> bool:
+        """
+        Verify signature
+        Args:
+            data: Response data with sign
+        Returns:
+            True if signature is valid
+        """
+        received_sign = data.get('sign', '')
+        data_copy = data.copy()
+        if 'sign' in data_copy:
+            del data_copy['sign']
+        
+        # Remove empty values
+        data_copy = {k: v for k, v in data_copy.items() if v is not None and v != ''}
+        
+        # Sort by key
+        sorted_data = dict(sorted(data_copy.items()))
+        
+        # Build query string and add token
+        query_string = urlencode(sorted_data) + '&token=' + self.token
+        
+        # Calculate MD5 hash
+        expected_sign = hashlib.md5(query_string.encode('utf-8')).hexdigest().upper()
+        
+        return received_sign == expected_sign
+    
+    def pay_link(self, amount: float, coin: str = 'USDT', unique_id: str = None,
+                 name: str = None, return_url: str = None) -> dict:
+        """
+        Create payment link
+        Args:
+            amount: Payment amount (required)
+            coin: Currency type - USDT or TRX (required)
+            unique_id: Unique order ID (optional)
+            name: Display name (optional)
+            return_url: Return URL after payment (optional)
+        Returns:
+            dict with API response
+        """
+        data = {
+            'amount': amount,
+            'coin': coin
+        }
+        if unique_id:
+            data['unique_id'] = unique_id
+        if name:
+            data['name'] = name
+        if return_url:
+            data['return_url'] = return_url
+        
+        return self._post(self.api_url_paylink, data)
+    
+    def transfer(self, amount: float, to_user_id: int, coin: str = 'USDT',
+                 unique_id: str = None, name: str = None) -> dict:
+        """
+        Transfer to user
+        Args:
+            amount: Amount to transfer (required)
+            to_user_id: Telegram user ID (required)
+            coin: Currency type - USDT or TRX (required)
+            unique_id: Unique order ID (optional)
+            name: Display name (optional)
+        Returns:
+            dict with API response
+        """
+        data = {
+            'amount': amount,
+            'to_user_id': to_user_id,
+            'coin': coin
+        }
+        if unique_id:
+            data['unique_id'] = unique_id
+        if name:
+            data['name'] = name
+        
+        return self._post(self.api_url_transfer, data)
+    
+    def transaction_history(self, page: int = 1, limit: int = 20) -> dict:
+        """
+        Get transaction history
+        Args:
+            page: Page number
+            limit: Items per page
+        Returns:
+            dict with transaction history
+        """
+        data = {
+            'page': page,
+            'limit': limit
+        }
+        return self._post(self.api_url_history, data)
+    
+    def _post(self, url: str, data: dict) -> dict:
+        """
+        Send POST request to API
+        Args:
+            url: API endpoint URL
+            data: Request data
+        Returns:
+            dict with API response
+        """
+        try:
+            signed_data = self.sign(data)
+            
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'HTTP CLIENT'
+            }
+            
+            response = requests.post(url, data=urlencode(signed_data), 
+                                    headers=headers, timeout=10)
+            result = response.json()
+            
+            # Add status field for consistency
+            if result.get('code') == 10000:
+                result['status'] = True
+            else:
+                result['status'] = False
+            
+            return result
+            
+        except requests.exceptions.Timeout:
+            return {'status': False, 'message': 'Request timeout'}
+        except requests.exceptions.RequestException as e:
+            return {'status': False, 'message': f'Request error: {str(e)}'}
+        except json.JSONDecodeError:
+            return {'status': False, 'message': 'Invalid JSON response'}
+        except Exception as e:
+            return {'status': False, 'message': f'Error: {str(e)}'}
+
 
 # ══════════════════════════════════════════════════════════════
 # INISIALISASI
@@ -60,6 +421,10 @@ INVOICES_DB = 'pending_invoices.json'
 
 bot = telebot.TeleBot(BOT_TOKEN)
 NETWORK = Networks.TEST_NET if USE_TESTNET else Networks.MAIN_NET
+
+# Initialize Payment Gateways
+kkpay = KkPay(KKPAY_ID, KKPAY_SECRET)
+okaypay = OkayPay(OKAYPAY_ID, OKAYPAY_TOKEN)
 
 # ══════════════════════════════════════════════════════════════
 # DATABASE HELPERS
@@ -87,12 +452,13 @@ def is_premium(user_id):
 def get_premium_data(user_id):
     return load_json(PREMIUM_DB).get(str(user_id))
 
-def add_premium(user_id, invoice_id):
+def add_premium(user_id, invoice_id, gateway='cryptopay'):
     data = load_json(PREMIUM_DB)
     data[str(user_id)] = {
         'invoice_id': invoice_id,
         'activated': datetime.now().isoformat(),
-        'amount': FINAL_PRICE
+        'amount': FINAL_PRICE,
+        'gateway': gateway
     }
     save_json(PREMIUM_DB, data)
 
@@ -100,11 +466,12 @@ def add_premium(user_id, invoice_id):
 def get_invoice(user_id):
     return load_json(INVOICES_DB).get(str(user_id))
 
-def save_invoice(user_id, invoice_id, url):
+def save_invoice(user_id, invoice_id, url, gateway='cryptopay'):
     data = load_json(INVOICES_DB)
     data[str(user_id)] = {
         'id': invoice_id,
         'url': url,
+        'gateway': gateway,
         'created': datetime.now().isoformat()
     }
     save_json(INVOICES_DB, data)
@@ -119,8 +486,8 @@ def remove_invoice(user_id):
 # CRYPTOPAY FUNCTIONS
 # ══════════════════════════════════════════════════════════════
 
-async def create_invoice(user_id):
-    """Buat invoice pembayaran"""
+async def create_cryptopay_invoice(user_id):
+    """Buat invoice pembayaran via CryptoPay"""
     crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=NETWORK)
     
     try:
@@ -134,14 +501,14 @@ async def create_invoice(user_id):
             paid_btn_url=f'https://t.me/{bot_info}?start=paid',
             payload=str(user_id),
             allow_comments=False,
-            allow_anonymous=True  # Privasi user
+            allow_anonymous=True
         )
         return invoice
     finally:
         await crypto.close()
 
-async def check_invoice(invoice_id):
-    """Cek status invoice"""
+async def check_cryptopay_invoice(invoice_id):
+    """Cek status invoice CryptoPay"""
     crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=NETWORK)
     
     try:
@@ -150,7 +517,7 @@ async def check_invoice(invoice_id):
     finally:
         await crypto.close()
 
-async def get_app_info():
+async def get_cryptopay_info():
     """Get CryptoPay app info"""
     crypto = AioCryptoPay(token=CRYPTOPAY_TOKEN, network=NETWORK)
     
@@ -167,6 +534,40 @@ def run_async(coro):
         return loop.run_until_complete(coro)
     except Exception as e:
         raise e
+
+# ══════════════════════════════════════════════════════════════
+# KKPAY FUNCTIONS
+# ══════════════════════════════════════════════════════════════
+
+def create_kkpay_invoice(user_id):
+    """Buat invoice pembayaran via KkPay"""
+    unique_id = f"kkpay_{user_id}_{int(datetime.now().timestamp())}"
+    
+    result = kkpay.pay_link(
+        amount=FINAL_PRICE,
+        coin=DEFAULT_COIN,
+        unique_id=unique_id,
+        name='VIP Premium Lifetime'
+    )
+    
+    return result
+
+# ══════════════════════════════════════════════════════════════
+# OKAYPAY FUNCTIONS
+# ══════════════════════════════════════════════════════════════
+
+def create_okaypay_invoice(user_id):
+    """Buat invoice pembayaran via OkayPay"""
+    unique_id = f"okpay_{user_id}_{int(datetime.now().timestamp())}"
+    
+    result = okaypay.pay_link(
+        amount=FINAL_PRICE,
+        coin=DEFAULT_COIN,
+        unique_id=unique_id,
+        name='VIP Premium Lifetime'
+    )
+    
+    return result
 
 # ══════════════════════════════════════════════════════════════
 # MESSAGE TEMPLATES (Singkat & Rapi)
@@ -197,14 +598,32 @@ Status: ✅ *PREMIUM LIFETIME*
 Klik tombol untuk akses konten 👇
 """
 
-def msg_invoice(invoice_id):
+def msg_select_payment():
+    """Pesan pilih metode pembayaran"""
+    return f"""
+💳 *Pilih Metode Pembayaran*
+
+📦 Produk: VIP Premium Lifetime
+💵 Total: *${int(FINAL_PRICE)}*
+
+Pilih payment gateway di bawah:
+"""
+
+def msg_invoice(invoice_id, gateway='cryptopay'):
     """Pesan invoice pembayaran"""
     mode = "🧪 Mode: TESTNET" if USE_TESTNET else ""
+    gateway_name = {
+        'cryptopay': '🔷 CryptoPay',
+        'kkpay': '🟡 KkPay',
+        'okaypay': '🟢 OkayPay'
+    }.get(gateway, gateway)
+    
     return f"""
 💳 *Invoice Pembayaran*
 
 📦 VIP Premium Lifetime
 💵 Total: *${int(FINAL_PRICE)}*
+🏦 Gateway: {gateway_name}
 🔢 ID: `{invoice_id}`
 {mode}
 
@@ -278,12 +697,20 @@ Upgrade ke Premium:
 def msg_status_premium(data):
     """Status user premium"""
     date = data['activated'][:10]
+    gateway = data.get('gateway', 'cryptopay')
+    gateway_name = {
+        'cryptopay': 'CryptoPay',
+        'kkpay': 'KkPay',
+        'okaypay': 'OkayPay'
+    }.get(gateway, gateway)
+    
     return f"""
 📊 *Status Keanggotaan*
 
 ✅ Status: *PREMIUM*
 📅 Sejak: {date}
 ⏰ Durasi: *LIFETIME*
+🏦 Gateway: {gateway_name}
 """
 
 def msg_help():
@@ -297,12 +724,15 @@ def msg_help():
 
 *Cara Beli:*
 1. Klik "Beli Premium"
-2. Bayar dengan crypto
-3. Verifikasi pembayaran
-4. Akses premium!
+2. Pilih payment gateway
+3. Bayar dengan crypto
+4. Verifikasi pembayaran
+5. Akses premium!
 
-*Pembayaran:*
-USDT • TON • BTC • ETH • dll
+*Payment Gateway:*
+🔷 CryptoPay - USDT, TON, BTC, ETH
+🟡 KkPay - USDT, TRX
+🟢 OkayPay - USDT, TRX
 """
 
 # ══════════════════════════════════════════════════════════════
@@ -328,22 +758,33 @@ def kb_premium():
     )
     return kb
 
-def kb_invoice(invoice_url, invoice_id):
-    """Keyboard invoice"""
+def kb_payment_methods():
+    """Keyboard pilih metode pembayaran"""
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton("💰 Bayar Sekarang", url=invoice_url),
-        types.InlineKeyboardButton("✅ Verifikasi", callback_data=f'verify_{invoice_id}'),
+        types.InlineKeyboardButton("🔷 CryptoPay (USDT/TON/BTC)", callback_data='pay_cryptopay'),
+        types.InlineKeyboardButton("🟡 KkPay (USDT/TRX)", callback_data='pay_kkpay'),
+        types.InlineKeyboardButton("🟢 OkayPay (USDT/TRX)", callback_data='pay_okaypay'),
         types.InlineKeyboardButton("❌ Batal", callback_data='cancel')
     )
     return kb
 
-def kb_pending(invoice_url, invoice_id):
+def kb_invoice(invoice_url, invoice_id, gateway='cryptopay'):
+    """Keyboard invoice"""
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("💰 Bayar Sekarang", url=invoice_url),
+        types.InlineKeyboardButton("✅ Verifikasi", callback_data=f'verify_{gateway}_{invoice_id}'),
+        types.InlineKeyboardButton("❌ Batal", callback_data='cancel')
+    )
+    return kb
+
+def kb_pending(invoice_url, invoice_id, gateway='cryptopay'):
     """Keyboard pending payment"""
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
         types.InlineKeyboardButton("💰 Bayar", url=invoice_url),
-        types.InlineKeyboardButton("🔄 Cek Ulang", callback_data=f'verify_{invoice_id}')
+        types.InlineKeyboardButton("🔄 Cek Ulang", callback_data=f'verify_{gateway}_{invoice_id}')
     )
     return kb
 
@@ -392,7 +833,8 @@ def cmd_start(message):
         if args[1] == 'paid' or args[1].startswith('paid_'):
             pending = get_invoice(user_id)
             if pending:
-                verify_payment(message.chat.id, pending['id'], user_id)
+                gateway = pending.get('gateway', 'cryptopay')
+                verify_payment(message.chat.id, pending['id'], user_id, gateway=gateway)
                 return
     
     # Check premium status
@@ -455,18 +897,36 @@ def cb_menu(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == 'buy')
 def cb_buy(call):
-    """Handle buy premium"""
+    """Handle buy premium - show payment methods"""
     user_id = call.from_user.id
     
     if is_premium(user_id):
         bot.answer_callback_query(call.id, "✅ Kamu sudah premium!", show_alert=True)
         return
     
-    bot.answer_callback_query(call.id, "⏳ Membuat invoice...")
+    bot.edit_message_text(
+        msg_select_payment(),
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode='Markdown',
+        reply_markup=kb_payment_methods()
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == 'pay_cryptopay')
+def cb_pay_cryptopay(call):
+    """Handle CryptoPay payment"""
+    user_id = call.from_user.id
+    
+    if is_premium(user_id):
+        bot.answer_callback_query(call.id, "✅ Kamu sudah premium!", show_alert=True)
+        return
+    
+    bot.answer_callback_query(call.id, "⏳ Membuat invoice CryptoPay...")
     
     try:
         bot.edit_message_text(
-            "⏳ *Membuat invoice...*",
+            "⏳ *Membuat invoice CryptoPay...*",
             call.message.chat.id,
             call.message.message_id,
             parse_mode='Markdown'
@@ -475,21 +935,129 @@ def cb_buy(call):
         pass
     
     try:
-        invoice = run_async(create_invoice(user_id))
-        save_invoice(user_id, invoice.invoice_id, invoice.bot_invoice_url)
+        invoice = run_async(create_cryptopay_invoice(user_id))
+        save_invoice(user_id, invoice.invoice_id, invoice.bot_invoice_url, 'cryptopay')
         
         bot.edit_message_text(
-            msg_invoice(invoice.invoice_id),
+            msg_invoice(invoice.invoice_id, 'cryptopay'),
             call.message.chat.id,
             call.message.message_id,
             parse_mode='Markdown',
-            reply_markup=kb_invoice(invoice.bot_invoice_url, invoice.invoice_id)
+            reply_markup=kb_invoice(invoice.bot_invoice_url, invoice.invoice_id, 'cryptopay')
         )
         
     except Exception as e:
-        print(f"Error creating invoice: {e}")
+        print(f"Error creating CryptoPay invoice: {e}")
         bot.edit_message_text(
             msg_error(),
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=kb_retry()
+        )
+
+@bot.callback_query_handler(func=lambda c: c.data == 'pay_kkpay')
+def cb_pay_kkpay(call):
+    """Handle KkPay payment"""
+    user_id = call.from_user.id
+    
+    if is_premium(user_id):
+        bot.answer_callback_query(call.id, "✅ Kamu sudah premium!", show_alert=True)
+        return
+    
+    bot.answer_callback_query(call.id, "⏳ Membuat invoice KkPay...")
+    
+    try:
+        bot.edit_message_text(
+            "⏳ *Membuat invoice KkPay...*",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown'
+        )
+    except:
+        pass
+    
+    try:
+        result = create_kkpay_invoice(user_id)
+        
+        if result.get('status'):
+            data = result.get('data', {})
+            invoice_id = data.get('order_id', f"kk_{user_id}_{int(datetime.now().timestamp())}")
+            pay_url = data.get('pay_url', data.get('url', ''))
+            
+            if pay_url:
+                save_invoice(user_id, invoice_id, pay_url, 'kkpay')
+                
+                bot.edit_message_text(
+                    msg_invoice(invoice_id, 'kkpay'),
+                    call.message.chat.id,
+                    call.message.message_id,
+                    parse_mode='Markdown',
+                    reply_markup=kb_invoice(pay_url, invoice_id, 'kkpay')
+                )
+            else:
+                raise Exception("No payment URL returned")
+        else:
+            raise Exception(result.get('message', 'KkPay error'))
+            
+    except Exception as e:
+        print(f"Error creating KkPay invoice: {e}")
+        bot.edit_message_text(
+            f"❌ *KkPay Error*\n\n{str(e)[:100]}\n\nCoba metode pembayaran lain.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=kb_retry()
+        )
+
+@bot.callback_query_handler(func=lambda c: c.data == 'pay_okaypay')
+def cb_pay_okaypay(call):
+    """Handle OkayPay payment"""
+    user_id = call.from_user.id
+    
+    if is_premium(user_id):
+        bot.answer_callback_query(call.id, "✅ Kamu sudah premium!", show_alert=True)
+        return
+    
+    bot.answer_callback_query(call.id, "⏳ Membuat invoice OkayPay...")
+    
+    try:
+        bot.edit_message_text(
+            "⏳ *Membuat invoice OkayPay...*",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown'
+        )
+    except:
+        pass
+    
+    try:
+        result = create_okaypay_invoice(user_id)
+        
+        if result.get('status') or result.get('code') == 10000:
+            data = result.get('data', result)
+            invoice_id = data.get('order_id', f"ok_{user_id}_{int(datetime.now().timestamp())}")
+            pay_url = data.get('pay_url', data.get('url', ''))
+            
+            if pay_url:
+                save_invoice(user_id, invoice_id, pay_url, 'okaypay')
+                
+                bot.edit_message_text(
+                    msg_invoice(invoice_id, 'okaypay'),
+                    call.message.chat.id,
+                    call.message.message_id,
+                    parse_mode='Markdown',
+                    reply_markup=kb_invoice(pay_url, invoice_id, 'okaypay')
+                )
+            else:
+                raise Exception("No payment URL returned")
+        else:
+            raise Exception(result.get('message', 'OkayPay error'))
+            
+    except Exception as e:
+        print(f"Error creating OkayPay invoice: {e}")
+        bot.edit_message_text(
+            f"❌ *OkayPay Error*\n\n{str(e)[:100]}\n\nCoba metode pembayaran lain.",
             call.message.chat.id,
             call.message.message_id,
             parse_mode='Markdown',
@@ -499,11 +1067,19 @@ def cb_buy(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith('verify_'))
 def cb_verify(call):
     """Verify payment"""
-    invoice_id = call.data.replace('verify_', '')
+    parts = call.data.split('_', 2)
+    if len(parts) >= 3:
+        gateway = parts[1]
+        invoice_id = parts[2]
+    else:
+        # Fallback for old format
+        invoice_id = call.data.replace('verify_', '')
+        gateway = 'cryptopay'
+    
     user_id = call.from_user.id
     
     bot.answer_callback_query(call.id, "🔍 Memeriksa pembayaran...")
-    verify_payment(call.message.chat.id, invoice_id, user_id, call.message.message_id)
+    verify_payment(call.message.chat.id, invoice_id, user_id, call.message.message_id, gateway)
 
 @bot.callback_query_handler(func=lambda c: c.data == 'status')
 def cb_status(call):
@@ -539,32 +1115,55 @@ def cb_cancel(call):
 # HELPER FUNCTIONS
 # ══════════════════════════════════════════════════════════════
 
-def verify_payment(chat_id, invoice_id, user_id, msg_id=None):
-    """Verify payment status"""
+def verify_payment(chat_id, invoice_id, user_id, msg_id=None, gateway='cryptopay'):
+    """Verify payment status based on gateway"""
     try:
-        invoice = run_async(check_invoice(int(invoice_id)))
+        pending = get_invoice(user_id)
         
-        if not invoice:
-            text = msg_error()
-            kb = kb_retry()
-        elif invoice.status == 'paid':
-            # Payment successful!
-            if not is_premium(user_id):
-                add_premium(user_id, invoice_id)
-            remove_invoice(user_id)
+        if gateway == 'cryptopay':
+            # Verify CryptoPay payment
+            invoice = run_async(check_cryptopay_invoice(int(invoice_id)))
             
-            text = msg_success(invoice_id)
-            kb = kb_success()
+            if not invoice:
+                text = msg_error()
+                kb = kb_retry()
+            elif invoice.status == 'paid':
+                if not is_premium(user_id):
+                    add_premium(user_id, invoice_id, 'cryptopay')
+                remove_invoice(user_id)
+                
+                text = msg_success(invoice_id)
+                kb = kb_success()
+                notify_admin(user_id, invoice_id, 'cryptopay')
+                
+            elif invoice.status == 'active':
+                text = msg_pending(invoice_id)
+                kb = kb_pending(invoice.bot_invoice_url, invoice_id, 'cryptopay')
+            else:
+                text = msg_expired()
+                kb = kb_retry()
+                
+        elif gateway in ['kkpay', 'okaypay']:
+            # For KkPay and OkayPay, we rely on webhook callbacks
+            # For now, we'll check if user confirms payment manually
+            # In production, implement webhook endpoint
             
-            # Notify admin (internal, no user info exposed)
-            notify_admin(user_id, invoice_id)
-            
-        elif invoice.status == 'active':
-            text = msg_pending(invoice_id)
-            kb = kb_pending(invoice.bot_invoice_url, invoice_id)
+            if pending:
+                text = f"""
+⏳ *Menunggu Konfirmasi*
+
+🔢 Invoice: `{invoice_id}`
+🏦 Gateway: {gateway.upper()}
+
+Pembayaran akan diverifikasi otomatis.
+Jika sudah bayar, tunggu beberapa saat.
+"""
+                kb = kb_pending(pending.get('url', ''), invoice_id, gateway)
+            else:
+                text = msg_expired()
+                kb = kb_retry()
         else:
-            # Expired or cancelled
-            text = msg_expired()
+            text = msg_error()
             kb = kb_retry()
         
         if msg_id:
@@ -618,20 +1217,148 @@ def show_status(chat_id, user_id, msg_id=None):
             reply_markup=kb
         )
 
-def notify_admin(user_id, invoice_id):
-    """Notify admin about new payment (private, no user data exposed to users)"""
+def notify_admin(user_id, invoice_id, gateway='cryptopay'):
+    """Notify admin about new payment"""
     try:
-        # Internal notification only
+        gateway_name = {
+            'cryptopay': '🔷 CryptoPay',
+            'kkpay': '🟡 KkPay',
+            'okaypay': '🟢 OkayPay'
+        }.get(gateway, gateway)
+        
         text = f"""
 🔔 *Pembayaran Baru*
 
 💰 ${int(FINAL_PRICE)}
+🏦 {gateway_name}
 🔢 Invoice: `{invoice_id}`
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         bot.send_message(ADMIN_ID, text, parse_mode='Markdown')
     except:
         pass
+
+# ══════════════════════════════════════════════════════════════
+# WEBHOOK HANDLERS FOR KKPAY & OKAYPAY
+# ══════════════════════════════════════════════════════════════
+
+def handle_kkpay_webhook(data):
+    """
+    Handle KkPay webhook notification
+    Call this from your webhook endpoint
+    
+    Expected data format:
+    {
+        'id': merchant_id,
+        'sign': signature,
+        'status': 'success',
+        'code': 10000,
+        'data': {
+            'order_id': 'api_order_id',
+            'unique_id': 'your_order_id',
+            'pay_user_id': 'telegram_user_id',
+            'amount': 150.0,
+            'coin': 'USDT'
+        }
+    }
+    """
+    try:
+        if data.get('status') == 'success' and data.get('code') == 10000:
+            order_data = data.get('data', {})
+            unique_id = order_data.get('unique_id', '')
+            pay_user_id = order_data.get('pay_user_id')
+            
+            if pay_user_id and unique_id:
+                # Extract user_id from unique_id
+                parts = unique_id.split('_')
+                if len(parts) >= 2:
+                    user_id = int(parts[1])
+                    
+                    if not is_premium(user_id):
+                        add_premium(user_id, unique_id, 'kkpay')
+                        remove_invoice(user_id)
+                        
+                        # Notify user
+                        try:
+                            bot.send_message(
+                                user_id,
+                                msg_success(unique_id),
+                                parse_mode='Markdown',
+                                reply_markup=kb_success()
+                            )
+                        except:
+                            pass
+                        
+                        # Notify admin
+                        notify_admin(user_id, unique_id, 'kkpay')
+                        
+                        return {'status': 'success'}
+        
+        return {'status': 'error', 'message': 'Invalid data'}
+        
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+def handle_okaypay_webhook(data):
+    """
+    Handle OkayPay webhook notification
+    Call this from your webhook endpoint
+    
+    Expected data format:
+    {
+        'id': merchant_id,
+        'sign': signature,
+        'status': 'success',
+        'code': 10000,
+        'data': {
+            'order_id': 'api_order_id',
+            'unique_id': 'your_order_id',
+            'pay_user_id': 'telegram_user_id',
+            'amount': 150.0,
+            'coin': 'USDT'
+        }
+    }
+    """
+    try:
+        # Verify signature
+        if not okaypay.check_sign(data):
+            return {'status': 'error', 'message': 'Invalid signature'}
+        
+        if data.get('status') == 'success' and data.get('code') == 10000:
+            order_data = data.get('data', {})
+            unique_id = order_data.get('unique_id', '')
+            pay_user_id = order_data.get('pay_user_id')
+            
+            if pay_user_id and unique_id:
+                # Extract user_id from unique_id
+                parts = unique_id.split('_')
+                if len(parts) >= 2:
+                    user_id = int(parts[1])
+                    
+                    if not is_premium(user_id):
+                        add_premium(user_id, unique_id, 'okaypay')
+                        remove_invoice(user_id)
+                        
+                        # Notify user
+                        try:
+                            bot.send_message(
+                                user_id,
+                                msg_success(unique_id),
+                                parse_mode='Markdown',
+                                reply_markup=kb_success()
+                            )
+                        except:
+                            pass
+                        
+                        # Notify admin
+                        notify_admin(user_id, unique_id, 'okaypay')
+                        
+                        return {'status': 'success'}
+        
+        return {'status': 'error', 'message': 'Invalid data'}
+        
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
 
 # ══════════════════════════════════════════════════════════════
 # ADMIN COMMANDS (Hidden from regular users)
@@ -648,6 +1375,14 @@ def cmd_admin(message):
     revenue = sum(u.get('amount', 0) for u in users.values())
     mode = "🧪 TESTNET" if USE_TESTNET else "🔐 MAINNET"
     
+    # Count by gateway
+    gateway_counts = {}
+    for u in users.values():
+        gw = u.get('gateway', 'cryptopay')
+        gateway_counts[gw] = gateway_counts.get(gw, 0) + 1
+    
+    gateway_stats = '\n'.join([f"  • {k}: {v}" for k, v in gateway_counts.items()])
+    
     text = f"""
 🔧 *Admin Panel*
 
@@ -656,8 +1391,14 @@ def cmd_admin(message):
 💰 Revenue: ${revenue}
 💵 Price: ${int(FINAL_PRICE)}
 
+📊 *By Gateway:*
+{gateway_stats}
+
 /testapi - Test CryptoPay
+/testkkpay - Test KkPay
+/testokaypay - Test OkayPay
 /broadcast <msg> - Broadcast
+/addpremium <user_id> - Add premium
 """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
@@ -667,20 +1408,86 @@ def cmd_testapi(message):
     if message.from_user.id != ADMIN_ID:
         return
     
-    bot.reply_to(message, "🔄 Testing API...")
+    bot.reply_to(message, "🔄 Testing CryptoPay API...")
     
     try:
-        info = run_async(get_app_info())
+        info = run_async(get_cryptopay_info())
         mode = "TESTNET" if USE_TESTNET else "MAINNET"
         text = f"""
-✅ *API Connected*
+✅ *CryptoPay API Connected*
 
 📱 App: {info.name}
 🌐 Network: {mode}
 """
         bot.send_message(message.chat.id, text, parse_mode='Markdown')
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Error: {str(e)[:100]}")
+        bot.send_message(message.chat.id, f"❌ CryptoPay Error: {str(e)[:100]}")
+
+@bot.message_handler(commands=['testkkpay'])
+def cmd_testkkpay(message):
+    """Test KkPay API"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    bot.reply_to(message, "🔄 Testing KkPay API...")
+    
+    try:
+        result = kkpay.pay_link(amount=1.0, coin='USDT', name='Test')
+        if result.get('status'):
+            text = f"""
+✅ *KkPay API Connected*
+
+📱 Merchant ID: {KKPAY_ID}
+🌐 API: gamepay.tech
+💰 Test result: Success
+"""
+        else:
+            text = f"⚠️ KkPay Response: {result.get('message', 'Unknown')}"
+        bot.send_message(message.chat.id, text, parse_mode='Markdown')
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ KkPay Error: {str(e)[:100]}")
+
+@bot.message_handler(commands=['testokaypay'])
+def cmd_testokaypay(message):
+    """Test OkayPay API"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    bot.reply_to(message, "🔄 Testing OkayPay API...")
+    
+    try:
+        result = okaypay.pay_link(amount=1.0, coin='USDT', name='Test')
+        if result.get('status') or result.get('code') == 10000:
+            text = f"""
+✅ *OkayPay API Connected*
+
+📱 Merchant ID: {OKAYPAY_ID}
+🌐 API: okaypay.me
+💰 Test result: Success
+"""
+        else:
+            text = f"⚠️ OkayPay Response: {result.get('message', 'Unknown')}"
+        bot.send_message(message.chat.id, text, parse_mode='Markdown')
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ OkayPay Error: {str(e)[:100]}")
+
+@bot.message_handler(commands=['addpremium'])
+def cmd_addpremium(message):
+    """Manually add premium user"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "Usage: /addpremium <user_id>")
+        return
+    
+    try:
+        target_user_id = int(args[1])
+        add_premium(target_user_id, f"manual_{int(datetime.now().timestamp())}", 'manual')
+        bot.reply_to(message, f"✅ Added premium for user {target_user_id}")
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid user ID")
 
 @bot.message_handler(commands=['broadcast'])
 def cmd_broadcast(message):
@@ -725,13 +1532,18 @@ def default_handler(message):
 if __name__ == '__main__':
     mode = "🧪 TESTNET MODE" if USE_TESTNET else "🔐 PRODUCTION MODE"
     
-    print("═" * 40)
-    print("🤖 VIP Premium Bot")
-    print("═" * 40)
+    print("═" * 50)
+    print("🤖 VIP Premium Bot - Multi Payment Gateway")
+    print("═" * 50)
     print(f"Mode: {mode}")
     print(f"Price: ${int(FINAL_PRICE)} (was ${ORIGINAL_PRICE})")
-    print("═" * 40)
+    print("═" * 50)
+    print("Payment Gateways:")
+    print("  🔷 CryptoPay: Enabled")
+    print(f"  🟡 KkPay: {'Configured' if KKPAY_ID != 'YOUR_KKPAY_ID' else 'Not configured'}")
+    print(f"  🟢 OkayPay: {'Configured' if OKAYPAY_ID != 'YOUR_OKAYPAY_ID' else 'Not configured'}")
+    print("═" * 50)
     print("Bot running...")
-    print("═" * 40)
+    print("═" * 50)
     
     bot.infinity_polling()
