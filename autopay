@@ -57,7 +57,7 @@ OKAYPAY_TOKEN = '98Vd6feiQGUqglxABsKOSW02r4Jw7Za'
 USE_TESTNET = False
 
 # Link Premium Channel (private invite link)
-PREMIUM_LINK = 'https://t.me/+RczGHAYyuPthMjll
+PREMIUM_LINK = 'https://t.me/+RczGHAYyuPthMjll'
 
 # Admin ID (untuk notifikasi internal saja, tidak ditampilkan ke user)
 ADMIN_ID = 6683929810
@@ -76,21 +76,37 @@ INVOICES_DB = 'pending_invoices.json'
 
 # ══════════════════════════════════════════════════════════════
 # KKPAY PAYMENT GATEWAY CLASS
+# Based on KkPay API Documentation
+# API URL: https://www.gamepay.tech/merchant/
 # ══════════════════════════════════════════════════════════════
 
 class KkPay:
     """
     KkPay Payment Gateway
-    API URL: https://www.gamepay.tech/merchant/
+    
+    API Endpoints:
+    - /merchant/payLink - Create payment link
+    - /merchant/createWithdrawOrder - Create withdrawal order
+    - /merchant/checkDeposit - Check deposit order status
+    - /merchant/checkWithdraw - Check withdrawal order status
+    - /api/merchant/censorUserByTGID - Check if user exists
+    
+    Authentication:
+    - Headers: KKPAY-ID, KKPAY-SIGN
+    - Data is base64 encoded
+    - Signature: base64(SHA-256(base64_data + secret))
+    
+    Response:
+    - code: 1000 for success
+    - message: Error message
+    - data: Base64 encoded JSON data
     """
     
     def __init__(self, merchant_id: str, secret: str):
         self.id = merchant_id
         self.secret = secret
         self.api_url = 'https://www.gamepay.tech/merchant/'
-        self.api_url_paylink = self.api_url + 'payLink'
-        self.api_url_withdraw = self.api_url + 'createWithdrawOrder'
-    
+        
     def sign(self, data: str) -> str:
         """
         Generate signature for data
@@ -116,63 +132,126 @@ class KkPay:
         expected_signature = self.sign(data)
         return expected_signature == received_signature
     
-    def pay_link(self, amount: float, coin: str = 'USDT', unique_id: str = None, 
+    def pay_link(self, amount: float, coin: str = 'USDT', user_order: str = None, 
                  name: str = None, return_url: str = None) -> dict:
         """
         Create payment link
+        
         Args:
-            amount: Payment amount (required)
-            coin: Currency type - USDT or TRX (required)
-            unique_id: Unique order ID (optional)
-            name: Display name (optional)
+            amount: Payment amount (required) - auto truncated to 2 decimals
+            coin: Currency type - USDT, TRX, CNY, KKCOIN (required)
+            user_order: Customer order ID (optional, unique - duplicates return previous data)
+            name: Display text during payment (optional)
             return_url: Return URL after payment (optional)
+            
         Returns:
-            dict with status and payment data
+            dict with:
+            - status: True/False
+            - data: {txid, amount, currency, fee, pay_url}
         """
         data = {
-            'amount': amount,
+            'amount': float(amount),
             'coin': coin
         }
-        if unique_id:
-            data['unique_id'] = unique_id
+        if user_order:
+            data['userOrder'] = user_order
         if name:
             data['name'] = name
         if return_url:
             data['return_url'] = return_url
         
-        return self._post(self.api_url_paylink, data)
+        return self._post(self.api_url + 'payLink', data)
     
-    def create_withdraw_order(self, amount: float, to_user_id: int, coin: str = 'USDT',
-                              unique_id: str = None, name: str = None) -> dict:
+    def check_deposit(self, txid: str) -> dict:
         """
-        Create withdrawal order to transfer to user
+        Check deposit order status
+        
         Args:
-            amount: Amount to transfer (required)
-            to_user_id: Telegram user ID (required)
-            coin: Currency type - USDT or TRX (required)
-            unique_id: Unique order ID (optional)
-            name: Display name (optional)
+            txid: KkPay order ID (required)
+            
         Returns:
-            dict with status and transfer data
+            dict with:
+            - status: True/False
+            - data: {txid, amount, currency, fee, statusText, name, payUser}
+            - statusText values: padding (unpaid), success (paid), fail (expired)
         """
         data = {
-            'amount': amount,
-            'to_user_id': to_user_id,
+            'txid': txid
+        }
+        return self._post(self.api_url + 'checkDeposit', data)
+    
+    def create_withdraw_order(self, amount: float, to_user_id: int, coin: str = 'USDT',
+                              user_order: str = None, name: str = None) -> dict:
+        """
+        Create withdrawal order to transfer to user
+        
+        Args:
+            amount: Amount to transfer (required)
+            to_user_id: Telegram user ID (required) - user must have started KkPay
+            coin: Currency type - USDT, TRX, CNY, KKCOIN (required)
+            user_order: Customer order ID (optional)
+            name: Display note when user receives (optional)
+            
+        Returns:
+            dict with:
+            - status: True/False
+            - data: {txid, amount, currency, fee, userOrder, name}
+        """
+        data = {
+            'amount': float(amount),
+            'to_user_id': int(to_user_id),
             'coin': coin
         }
-        if unique_id:
-            data['unique_id'] = unique_id
+        if user_order:
+            data['userOrder'] = user_order
         if name:
             data['name'] = name
         
-        return self._post(self.api_url_withdraw, data)
+        return self._post(self.api_url + 'createWithdrawOrder', data)
+    
+    def check_withdraw(self, txid: str) -> dict:
+        """
+        Check withdrawal order status
+        
+        Args:
+            txid: KkPay order ID (required)
+            
+        Returns:
+            dict with:
+            - status: True/False
+            - data: {txid, amount, currency, fee, orderStatus, name, userOrder, to_user_id}
+            - orderStatus values: padding (processing), success (completed), fail (failed)
+        """
+        data = {
+            'txid': txid
+        }
+        return self._post(self.api_url + 'checkWithdraw', data)
+    
+    def check_user_exists(self, tg_id: str) -> dict:
+        """
+        Check if Telegram user exists/has started KkPay bot
+        
+        Args:
+            tg_id: Telegram ID (required)
+            
+        Returns:
+            dict with:
+            - status: True/False
+            - data: {tg_id, isExist}
+        """
+        data = {
+            'tg_id': str(tg_id)
+        }
+        return self._post('https://www.gamepay.tech/api/merchant/censorUserByTGID', data)
     
     def _post(self, url: str, data: dict) -> dict:
         """
         Send POST request to API
+        
         Args:
             url: API endpoint URL
             data: Request data
+            
         Returns:
             dict with status and response data
         """
@@ -189,7 +268,7 @@ class KkPay:
                 'User-Agent': 'HTTP CLIENT'
             }
             
-            response = requests.post(url, data=b64_data, headers=headers, timeout=10)
+            response = requests.post(url, data=b64_data, headers=headers, timeout=15)
             
             # Get signature from response headers
             response_sign = response.headers.get('KKPAY-SIGN', '')
@@ -198,12 +277,19 @@ class KkPay:
             if response.text == 'Oops':
                 return {
                     'status': False,
-                    'message': 'IP whitelist error'
+                    'message': 'IP whitelist error - add server IP to KkPay merchant panel'
                 }
             
-            result = response.json()
+            try:
+                result = response.json()
+            except json.JSONDecodeError:
+                return {
+                    'status': False,
+                    'message': f'Invalid JSON response: {response.text[:100]}'
+                }
             
-            if result.get('code') == 10000:
+            # Check for success (code 1000 or 10000 based on API version)
+            if result.get('code') in [1000, 10000]:
                 response_data = result.get('data', '')
                 
                 # Verify response signature if present
@@ -211,64 +297,80 @@ class KkPay:
                     if not self.check_sign(response_data, response_sign):
                         return {
                             'status': False,
-                            'message': 'Signature verification failed'
+                            'message': 'Response signature verification failed'
                         }
                 
-                # Decode response data
+                # Decode response data (base64 encoded JSON)
                 if response_data:
-                    decoded_data = json.loads(base64.b64decode(response_data).decode('utf-8'))
-                    return {
-                        'status': True,
-                        'data': decoded_data
-                    }
+                    try:
+                        decoded_data = json.loads(base64.b64decode(response_data).decode('utf-8'))
+                        return {
+                            'status': True,
+                            'data': decoded_data
+                        }
+                    except Exception as e:
+                        return {
+                            'status': False,
+                            'message': f'Failed to decode response data: {str(e)}'
+                        }
                 
                 return {'status': True, 'data': result}
             else:
                 return {
                     'status': False,
-                    'message': result.get('message', 'Unknown error')
+                    'message': result.get('message', f'API error code: {result.get("code")}'),
+                    'code': result.get('code')
                 }
                 
         except requests.exceptions.Timeout:
-            return {'status': False, 'message': 'Request timeout'}
+            return {'status': False, 'message': 'Request timeout - try again'}
+        except requests.exceptions.ConnectionError:
+            return {'status': False, 'message': 'Connection error - check network'}
         except requests.exceptions.RequestException as e:
             return {'status': False, 'message': f'Request error: {str(e)}'}
-        except json.JSONDecodeError:
-            return {'status': False, 'message': 'Invalid JSON response'}
         except Exception as e:
-            return {'status': False, 'message': f'Error: {str(e)}'}
+            return {'status': False, 'message': f'Unexpected error: {str(e)}'}
 
 
 # ══════════════════════════════════════════════════════════════
 # OKAYPAY PAYMENT GATEWAY CLASS
+# Based on OkayPay API Documentation
+# API URL: https://api.okaypay.me/shop/
 # ══════════════════════════════════════════════════════════════
 
 class OkayPay:
     """
     OkayPay Payment Gateway
-    API URL: https://api.okaypay.me/shop/
+    
+    API Endpoints:
+    - /shop/payLink - Create payment link
+    - /shop/transfer - Transfer to user
+    - /shop/TransactionHistory - Get transaction history
+    
+    Authentication:
+    - Data includes merchant id and sign
+    - Sign: MD5(sorted_params + &token=xxx).upper()
     """
     
     def __init__(self, merchant_id: str, token: str):
         self.id = merchant_id
         self.token = token
         self.api_url = 'https://api.okaypay.me/shop/'
-        self.api_url_paylink = self.api_url + 'payLink'
-        self.api_url_transfer = self.api_url + 'transfer'
-        self.api_url_history = self.api_url + 'TransactionHistory'
-    
+        
     def sign(self, data: dict) -> dict:
         """
         Generate signature for data
+        
         Args:
             data: Request data dict
+            
         Returns:
             Data dict with added id and sign
         """
         data = data.copy()
         data['id'] = self.id
         
-        # Remove empty values
+        # Remove empty/None values
         data = {k: v for k, v in data.items() if v is not None and v != ''}
         
         # Sort by key
@@ -277,7 +379,7 @@ class OkayPay:
         # Build query string and add token
         query_string = urlencode(sorted_data) + '&token=' + self.token
         
-        # Calculate MD5 hash
+        # Calculate MD5 hash (uppercase)
         sign = hashlib.md5(query_string.encode('utf-8')).hexdigest().upper()
         sorted_data['sign'] = sign
         
@@ -286,8 +388,10 @@ class OkayPay:
     def check_sign(self, data: dict) -> bool:
         """
         Verify signature
+        
         Args:
             data: Response data with sign
+            
         Returns:
             True if signature is valid
         """
@@ -296,7 +400,7 @@ class OkayPay:
         if 'sign' in data_copy:
             del data_copy['sign']
         
-        # Remove empty values
+        # Remove empty/None values
         data_copy = {k: v for k, v in data_copy.items() if v is not None and v != ''}
         
         # Sort by key
@@ -305,7 +409,7 @@ class OkayPay:
         # Build query string and add token
         query_string = urlencode(sorted_data) + '&token=' + self.token
         
-        # Calculate MD5 hash
+        # Calculate MD5 hash (uppercase)
         expected_sign = hashlib.md5(query_string.encode('utf-8')).hexdigest().upper()
         
         return received_sign == expected_sign
@@ -314,17 +418,19 @@ class OkayPay:
                  name: str = None, return_url: str = None) -> dict:
         """
         Create payment link
+        
         Args:
             amount: Payment amount (required)
             coin: Currency type - USDT or TRX (required)
             unique_id: Unique order ID (optional)
             name: Display name (optional)
             return_url: Return URL after payment (optional)
+            
         Returns:
             dict with API response
         """
         data = {
-            'amount': amount,
+            'amount': float(amount),
             'coin': coin
         }
         if unique_id:
@@ -334,24 +440,26 @@ class OkayPay:
         if return_url:
             data['return_url'] = return_url
         
-        return self._post(self.api_url_paylink, data)
+        return self._post(self.api_url + 'payLink', data)
     
     def transfer(self, amount: float, to_user_id: int, coin: str = 'USDT',
                  unique_id: str = None, name: str = None) -> dict:
         """
         Transfer to user
+        
         Args:
             amount: Amount to transfer (required)
             to_user_id: Telegram user ID (required)
             coin: Currency type - USDT or TRX (required)
             unique_id: Unique order ID (optional)
             name: Display name (optional)
+            
         Returns:
             dict with API response
         """
         data = {
-            'amount': amount,
-            'to_user_id': to_user_id,
+            'amount': float(amount),
+            'to_user_id': int(to_user_id),
             'coin': coin
         }
         if unique_id:
@@ -359,29 +467,33 @@ class OkayPay:
         if name:
             data['name'] = name
         
-        return self._post(self.api_url_transfer, data)
+        return self._post(self.api_url + 'transfer', data)
     
     def transaction_history(self, page: int = 1, limit: int = 20) -> dict:
         """
         Get transaction history
+        
         Args:
             page: Page number
             limit: Items per page
+            
         Returns:
             dict with transaction history
         """
         data = {
-            'page': page,
-            'limit': limit
+            'page': int(page),
+            'limit': int(limit)
         }
-        return self._post(self.api_url_history, data)
+        return self._post(self.api_url + 'TransactionHistory', data)
     
     def _post(self, url: str, data: dict) -> dict:
         """
         Send POST request to API
+        
         Args:
             url: API endpoint URL
             data: Request data
+            
         Returns:
             dict with API response
         """
@@ -394,11 +506,18 @@ class OkayPay:
             }
             
             response = requests.post(url, data=urlencode(signed_data), 
-                                    headers=headers, timeout=10)
-            result = response.json()
+                                    headers=headers, timeout=15)
+            
+            try:
+                result = response.json()
+            except json.JSONDecodeError:
+                return {
+                    'status': False,
+                    'message': f'Invalid JSON response: {response.text[:100]}'
+                }
             
             # Add status field for consistency
-            if result.get('code') == 10000:
+            if result.get('code') in [1000, 10000]:
                 result['status'] = True
             else:
                 result['status'] = False
@@ -406,13 +525,13 @@ class OkayPay:
             return result
             
         except requests.exceptions.Timeout:
-            return {'status': False, 'message': 'Request timeout'}
+            return {'status': False, 'message': 'Request timeout - try again'}
+        except requests.exceptions.ConnectionError:
+            return {'status': False, 'message': 'Connection error - check network'}
         except requests.exceptions.RequestException as e:
             return {'status': False, 'message': f'Request error: {str(e)}'}
-        except json.JSONDecodeError:
-            return {'status': False, 'message': 'Invalid JSON response'}
         except Exception as e:
-            return {'status': False, 'message': f'Error: {str(e)}'}
+            return {'status': False, 'message': f'Unexpected error: {str(e)}'}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -466,12 +585,13 @@ def add_premium(user_id, invoice_id, gateway='cryptopay'):
 def get_invoice(user_id):
     return load_json(INVOICES_DB).get(str(user_id))
 
-def save_invoice(user_id, invoice_id, url, gateway='cryptopay'):
+def save_invoice(user_id, invoice_id, url, gateway='cryptopay', txid=None):
     data = load_json(INVOICES_DB)
     data[str(user_id)] = {
         'id': invoice_id,
         'url': url,
         'gateway': gateway,
+        'txid': txid,  # KkPay transaction ID for verification
         'created': datetime.now().isoformat()
     }
     save_json(INVOICES_DB, data)
@@ -541,16 +661,20 @@ def run_async(coro):
 
 def create_kkpay_invoice(user_id):
     """Buat invoice pembayaran via KkPay"""
-    unique_id = f"kkpay_{user_id}_{int(datetime.now().timestamp())}"
+    user_order = f"kk_{user_id}_{int(datetime.now().timestamp())}"
     
     result = kkpay.pay_link(
         amount=FINAL_PRICE,
         coin=DEFAULT_COIN,
-        unique_id=unique_id,
+        user_order=user_order,
         name='VIP Premium Lifetime'
     )
     
     return result
+
+def check_kkpay_payment(txid: str):
+    """Check KkPay payment status by txid"""
+    return kkpay.check_deposit(txid)
 
 # ══════════════════════════════════════════════════════════════
 # OKAYPAY FUNCTIONS
@@ -834,7 +958,8 @@ def cmd_start(message):
             pending = get_invoice(user_id)
             if pending:
                 gateway = pending.get('gateway', 'cryptopay')
-                verify_payment(message.chat.id, pending['id'], user_id, gateway=gateway)
+                txid = pending.get('txid') or pending.get('id')
+                verify_payment(message.chat.id, txid, user_id, gateway=gateway)
                 return
     
     # Check premium status
@@ -982,28 +1107,31 @@ def cb_pay_kkpay(call):
         
         if result.get('status'):
             data = result.get('data', {})
-            invoice_id = data.get('order_id', f"kk_{user_id}_{int(datetime.now().timestamp())}")
-            pay_url = data.get('pay_url', data.get('url', ''))
+            # KkPay returns: txid, amount, currency, fee, pay_url
+            txid = data.get('txid', '')
+            pay_url = data.get('pay_url', '')
             
-            if pay_url:
-                save_invoice(user_id, invoice_id, pay_url, 'kkpay')
+            if pay_url and txid:
+                # Save with txid for verification
+                save_invoice(user_id, txid, pay_url, 'kkpay', txid=txid)
                 
                 bot.edit_message_text(
-                    msg_invoice(invoice_id, 'kkpay'),
+                    msg_invoice(txid, 'kkpay'),
                     call.message.chat.id,
                     call.message.message_id,
                     parse_mode='Markdown',
-                    reply_markup=kb_invoice(pay_url, invoice_id, 'kkpay')
+                    reply_markup=kb_invoice(pay_url, txid, 'kkpay')
                 )
             else:
-                raise Exception("No payment URL returned")
+                raise Exception(f"No payment URL or txid returned. Data: {data}")
         else:
-            raise Exception(result.get('message', 'KkPay error'))
+            error_msg = result.get('message', 'Unknown KkPay error')
+            raise Exception(error_msg)
             
     except Exception as e:
         print(f"Error creating KkPay invoice: {e}")
         bot.edit_message_text(
-            f"❌ *KkPay Error*\n\n{str(e)[:100]}\n\nCoba metode pembayaran lain.",
+            f"❌ *KkPay Error*\n\n{str(e)[:200]}\n\nCoba metode pembayaran lain.",
             call.message.chat.id,
             call.message.message_id,
             parse_mode='Markdown',
@@ -1034,7 +1162,7 @@ def cb_pay_okaypay(call):
     try:
         result = create_okaypay_invoice(user_id)
         
-        if result.get('status') or result.get('code') == 10000:
+        if result.get('status') or result.get('code') in [1000, 10000]:
             data = result.get('data', result)
             invoice_id = data.get('order_id', f"ok_{user_id}_{int(datetime.now().timestamp())}")
             pay_url = data.get('pay_url', data.get('url', ''))
@@ -1057,7 +1185,7 @@ def cb_pay_okaypay(call):
     except Exception as e:
         print(f"Error creating OkayPay invoice: {e}")
         bot.edit_message_text(
-            f"❌ *OkayPay Error*\n\n{str(e)[:100]}\n\nCoba metode pembayaran lain.",
+            f"❌ *OkayPay Error*\n\n{str(e)[:200]}\n\nCoba metode pembayaran lain.",
             call.message.chat.id,
             call.message.message_id,
             parse_mode='Markdown',
@@ -1143,17 +1271,57 @@ def verify_payment(chat_id, invoice_id, user_id, msg_id=None, gateway='cryptopay
                 text = msg_expired()
                 kb = kb_retry()
                 
-        elif gateway in ['kkpay', 'okaypay']:
-            # For KkPay and OkayPay, we rely on webhook callbacks
-            # For now, we'll check if user confirms payment manually
-            # In production, implement webhook endpoint
+        elif gateway == 'kkpay':
+            # Verify KkPay payment using checkDeposit API
+            txid = pending.get('txid') if pending else invoice_id
+            result = check_kkpay_payment(txid)
             
+            if result.get('status'):
+                data = result.get('data', {})
+                status_text = data.get('statusText', 'padding')
+                
+                if status_text == 'success':
+                    # Payment successful
+                    if not is_premium(user_id):
+                        add_premium(user_id, txid, 'kkpay')
+                    remove_invoice(user_id)
+                    
+                    text = msg_success(txid)
+                    kb = kb_success()
+                    notify_admin(user_id, txid, 'kkpay')
+                    
+                elif status_text == 'padding':
+                    # Still waiting for payment
+                    pay_url = pending.get('url', '') if pending else ''
+                    text = msg_pending(txid)
+                    kb = kb_pending(pay_url, txid, 'kkpay')
+                    
+                else:  # fail - expired
+                    text = msg_expired()
+                    kb = kb_retry()
+                    remove_invoice(user_id)
+            else:
+                # API error
+                error_msg = result.get('message', 'Unknown error')
+                text = f"""
+❌ *Verifikasi Gagal*
+
+Error: {error_msg[:100]}
+
+Coba beberapa saat lagi.
+"""
+                pay_url = pending.get('url', '') if pending else ''
+                kb = kb_pending(pay_url, invoice_id, 'kkpay') if pay_url else kb_retry()
+                
+        elif gateway == 'okaypay':
+            # For OkayPay, we rely on webhook callbacks
+            # Check if pending invoice exists
             if pending:
                 text = f"""
 ⏳ *Menunggu Konfirmasi*
 
 🔢 Invoice: `{invoice_id}`
-🏦 Gateway: {gateway.upper()}
+🏦 Gateway: OkayPay
 
 Pembayaran akan diverifikasi otomatis.
 Jika sudah bayar, tunggu beberapa saat.
@@ -1242,47 +1410,53 @@ def notify_admin(user_id, invoice_id, gateway='cryptopay'):
 # WEBHOOK HANDLERS FOR KKPAY & OKAYPAY
 # ══════════════════════════════════════════════════════════════
 
-def handle_kkpay_webhook(data):
+def handle_kkpay_callback(data: dict, sign: str) -> dict:
     """
-    Handle KkPay webhook notification
-    Call this from your webhook endpoint
+    Handle KkPay async notification callback
     
-    Expected data format:
+    Expected callback data (deposit):
     {
-        'id': merchant_id,
-        'sign': signature,
-        'status': 'success',
-        'code': 10000,
-        'data': {
-            'order_id': 'api_order_id',
-            'unique_id': 'your_order_id',
-            'pay_user_id': 'telegram_user_id',
-            'amount': 150.0,
-            'coin': 'USDT'
-        }
+        "businessType": "deposit",
+        "txid": "kkpay_order_id",
+        "payUser": "telegram_user_id",
+        "amount": 150.0,
+        "currency": "usdt",
+        "fee": 1.5,
+        "userOrder": "your_order_id"
     }
+    
+    Returns:
+        {'status': 'success'} on success
     """
     try:
-        if data.get('status') == 'success' and data.get('code') == 10000:
-            order_data = data.get('data', {})
-            unique_id = order_data.get('unique_id', '')
-            pay_user_id = order_data.get('pay_user_id')
+        # Verify signature
+        b64_data = base64.b64encode(json.dumps(data).encode('utf-8')).decode('utf-8')
+        if not kkpay.check_sign(b64_data, sign):
+            return {'status': 'error', 'message': 'Invalid signature'}
+        
+        business_type = data.get('businessType', '')
+        
+        if business_type == 'deposit':
+            # Deposit payment completed
+            user_order = data.get('userOrder', '')
+            txid = data.get('txid', '')
+            pay_user = data.get('payUser')
             
-            if pay_user_id and unique_id:
-                # Extract user_id from unique_id
-                parts = unique_id.split('_')
+            if user_order and pay_user:
+                # Extract user_id from userOrder (format: kk_USERID_TIMESTAMP)
+                parts = user_order.split('_')
                 if len(parts) >= 2:
                     user_id = int(parts[1])
                     
                     if not is_premium(user_id):
-                        add_premium(user_id, unique_id, 'kkpay')
+                        add_premium(user_id, txid, 'kkpay')
                         remove_invoice(user_id)
                         
                         # Notify user
                         try:
                             bot.send_message(
                                 user_id,
-                                msg_success(unique_id),
+                                msg_success(txid),
                                 parse_mode='Markdown',
                                 reply_markup=kb_success()
                             )
@@ -1290,21 +1464,32 @@ def handle_kkpay_webhook(data):
                             pass
                         
                         # Notify admin
-                        notify_admin(user_id, unique_id, 'kkpay')
+                        notify_admin(user_id, txid, 'kkpay')
                         
                         return {'status': 'success'}
         
-        return {'status': 'error', 'message': 'Invalid data'}
+        elif business_type == 'withdrawalPendingConfirm':
+            # Withdrawal pending confirmation - respond success to confirm
+            return {'status': 'success'}
+            
+        elif business_type == 'withdraw':
+            # Withdrawal completed
+            order_status = data.get('orderStatus', '')
+            if order_status == 'success':
+                return {'status': 'success'}
+            else:
+                return {'status': 'error', 'message': 'Withdrawal failed'}
+        
+        return {'status': 'error', 'message': 'Unknown business type'}
         
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
 
-def handle_okaypay_webhook(data):
+def handle_okaypay_callback(data: dict) -> dict:
     """
-    Handle OkayPay webhook notification
-    Call this from your webhook endpoint
+    Handle OkayPay async notification callback
     
-    Expected data format:
+    Expected callback data:
     {
         'id': merchant_id,
         'sign': signature,
@@ -1318,19 +1503,22 @@ def handle_okaypay_webhook(data):
             'coin': 'USDT'
         }
     }
+    
+    Returns:
+        {'status': 'success'} on success
     """
     try:
         # Verify signature
         if not okaypay.check_sign(data):
             return {'status': 'error', 'message': 'Invalid signature'}
         
-        if data.get('status') == 'success' and data.get('code') == 10000:
+        if data.get('status') == 'success' and data.get('code') in [1000, 10000]:
             order_data = data.get('data', {})
             unique_id = order_data.get('unique_id', '')
             pay_user_id = order_data.get('pay_user_id')
             
             if pay_user_id and unique_id:
-                # Extract user_id from unique_id
+                # Extract user_id from unique_id (format: okpay_USERID_TIMESTAMP)
                 parts = unique_id.split('_')
                 if len(parts) >= 2:
                     user_id = int(parts[1])
@@ -1421,7 +1609,7 @@ def cmd_testapi(message):
 """
         bot.send_message(message.chat.id, text, parse_mode='Markdown')
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ CryptoPay Error: {str(e)[:100]}")
+        bot.send_message(message.chat.id, f"❌ CryptoPay Error: {str(e)[:200]}")
 
 @bot.message_handler(commands=['testkkpay'])
 def cmd_testkkpay(message):
@@ -1432,20 +1620,23 @@ def cmd_testkkpay(message):
     bot.reply_to(message, "🔄 Testing KkPay API...")
     
     try:
-        result = kkpay.pay_link(amount=1.0, coin='USDT', name='Test')
+        result = kkpay.pay_link(amount=1.0, coin='USDT', name='API Test')
+        
         if result.get('status'):
+            data = result.get('data', {})
             text = f"""
 ✅ *KkPay API Connected*
 
 📱 Merchant ID: {KKPAY_ID}
 🌐 API: gamepay.tech
-💰 Test result: Success
+💰 Test txid: `{data.get('txid', 'N/A')}`
+🔗 Pay URL: {data.get('pay_url', 'N/A')[:50]}...
 """
         else:
-            text = f"⚠️ KkPay Response: {result.get('message', 'Unknown')}"
+            text = f"⚠️ KkPay Error: {result.get('message', 'Unknown')}"
         bot.send_message(message.chat.id, text, parse_mode='Markdown')
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ KkPay Error: {str(e)[:100]}")
+        bot.send_message(message.chat.id, f"❌ KkPay Error: {str(e)[:200]}")
 
 @bot.message_handler(commands=['testokaypay'])
 def cmd_testokaypay(message):
@@ -1456,20 +1647,21 @@ def cmd_testokaypay(message):
     bot.reply_to(message, "🔄 Testing OkayPay API...")
     
     try:
-        result = okaypay.pay_link(amount=1.0, coin='USDT', name='Test')
-        if result.get('status') or result.get('code') == 10000:
+        result = okaypay.pay_link(amount=1.0, coin='USDT', name='API Test')
+        if result.get('status') or result.get('code') in [1000, 10000]:
+            data = result.get('data', result)
             text = f"""
 ✅ *OkayPay API Connected*
 
 📱 Merchant ID: {OKAYPAY_ID}
 🌐 API: okaypay.me
-💰 Test result: Success
+💰 Test order_id: `{data.get('order_id', 'N/A')}`
 """
         else:
-            text = f"⚠️ OkayPay Response: {result.get('message', 'Unknown')}"
+            text = f"⚠️ OkayPay Error: {result.get('message', 'Unknown')}"
         bot.send_message(message.chat.id, text, parse_mode='Markdown')
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ OkayPay Error: {str(e)[:100]}")
+        bot.send_message(message.chat.id, f"❌ OkayPay Error: {str(e)[:200]}")
 
 @bot.message_handler(commands=['addpremium'])
 def cmd_addpremium(message):
