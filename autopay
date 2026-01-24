@@ -45,13 +45,19 @@ CRYPTOPAY_TOKEN = '53408:AA2RZsK4Y7gfG13O63eVfAiX0kruSc6gJEv'
 
 # KkPay Configuration
 # Dapatkan dari https://www.gamepay.tech merchant panel
-KKPAY_ID = 'YOUR_KKPAY_ID'
-KKPAY_SECRET = 'YOUR_KKPAY_SECRET'
+# 1. Login ke @kkpaybot di Telegram
+# 2. Salin ID dan 密钥 (Secret Key) dari panel
+# 3. Set IP Whitelist (设置ip白名单) dengan IP server kamu
+# 4. Set Callback URL (设置回调地址) jika perlu webhook
+KKPAY_ID = os.environ.get('KKPAY_ID', '')  # Merchant ID
+KKPAY_SECRET = os.environ.get('KKPAY_SECRET', '')  # Secret Key (密钥)
 
 # OkayPay Configuration
-# Dapatkan dari https://okaypay.me merchant panel
-OKAYPAY_ID = 'YOUR_OKAYPAY_ID'
-OKAYPAY_TOKEN = 'YOUR_OKAYPAY_TOKEN'
+# Dapatkan dari https://okaypay.me merchant panel atau @OkayPayBot
+# 1. Login ke @OkayPayBot di Telegram
+# 2. Salin ID dan Token dari panel
+OKAYPAY_ID = os.environ.get('OKAYPAY_ID', '')  # Merchant ID
+OKAYPAY_TOKEN = os.environ.get('OKAYPAY_TOKEN', '')  # Token
 
 # ⚠️ TESTNET MODE - Set True untuk testing, False untuk production
 USE_TESTNET = True
@@ -427,6 +433,18 @@ kkpay = KkPay(KKPAY_ID, KKPAY_SECRET)
 okaypay = OkayPay(OKAYPAY_ID, OKAYPAY_TOKEN)
 
 # ══════════════════════════════════════════════════════════════
+# GATEWAY CONFIGURATION HELPERS
+# ══════════════════════════════════════════════════════════════
+
+def is_kkpay_configured():
+    """Check if KkPay is properly configured"""
+    return bool(KKPAY_ID and KKPAY_SECRET and KKPAY_ID.strip() and KKPAY_SECRET.strip())
+
+def is_okaypay_configured():
+    """Check if OkayPay is properly configured"""
+    return bool(OKAYPAY_ID and OKAYPAY_TOKEN and OKAYPAY_ID.strip() and OKAYPAY_TOKEN.strip())
+
+# ══════════════════════════════════════════════════════════════
 # DATABASE HELPERS
 # ══════════════════════════════════════════════════════════════
 
@@ -761,12 +779,19 @@ def kb_premium():
 def kb_payment_methods():
     """Keyboard pilih metode pembayaran"""
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("🔷 CryptoPay (USDT/TON/BTC)", callback_data='pay_cryptopay'),
-        types.InlineKeyboardButton("🟡 KkPay (USDT/TRX)", callback_data='pay_kkpay'),
-        types.InlineKeyboardButton("🟢 OkayPay (USDT/TRX)", callback_data='pay_okaypay'),
-        types.InlineKeyboardButton("❌ Batal", callback_data='cancel')
-    )
+    
+    # CryptoPay always available
+    kb.add(types.InlineKeyboardButton("🔷 CryptoPay (USDT/TON/BTC)", callback_data='pay_cryptopay'))
+    
+    # KkPay - show status
+    if is_kkpay_configured():
+        kb.add(types.InlineKeyboardButton("🟡 KkPay (USDT/TRX)", callback_data='pay_kkpay'))
+    
+    # OkayPay - show status
+    if is_okaypay_configured():
+        kb.add(types.InlineKeyboardButton("🟢 OkayPay (USDT/TRX)", callback_data='pay_okaypay'))
+    
+    kb.add(types.InlineKeyboardButton("❌ Batal", callback_data='cancel'))
     return kb
 
 def kb_invoice(invoice_url, invoice_id, gateway='cryptopay'):
@@ -965,6 +990,20 @@ def cb_pay_kkpay(call):
         bot.answer_callback_query(call.id, "✅ Kamu sudah premium!", show_alert=True)
         return
     
+    # Check if KkPay is configured
+    if not is_kkpay_configured():
+        bot.answer_callback_query(call.id, "⚠️ KkPay belum dikonfigurasi", show_alert=True)
+        bot.edit_message_text(
+            "❌ *KkPay Tidak Tersedia*\n\n"
+            "Payment gateway ini belum dikonfigurasi.\n\n"
+            "Silakan gunakan metode pembayaran lain.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=kb_retry()
+        )
+        return
+    
     bot.answer_callback_query(call.id, "⏳ Membuat invoice KkPay...")
     
     try:
@@ -998,7 +1037,11 @@ def cb_pay_kkpay(call):
             else:
                 raise Exception("No payment URL returned")
         else:
-            raise Exception(result.get('message', 'KkPay error'))
+            error_msg = result.get('message', 'KkPay error')
+            # Provide helpful hints for common errors
+            if 'IP whitelist' in error_msg or error_msg == 'Oops':
+                error_msg = "IP whitelist error - Tambahkan IP server ke 设置ip白名单 di panel KkPay"
+            raise Exception(error_msg)
             
     except Exception as e:
         print(f"Error creating KkPay invoice: {e}")
@@ -1017,6 +1060,20 @@ def cb_pay_okaypay(call):
     
     if is_premium(user_id):
         bot.answer_callback_query(call.id, "✅ Kamu sudah premium!", show_alert=True)
+        return
+    
+    # Check if OkayPay is configured
+    if not is_okaypay_configured():
+        bot.answer_callback_query(call.id, "⚠️ OkayPay belum dikonfigurasi", show_alert=True)
+        bot.edit_message_text(
+            "❌ *OkayPay Tidak Tersedia*\n\n"
+            "Payment gateway ini belum dikonfigurasi.\n\n"
+            "Silakan gunakan metode pembayaran lain.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=kb_retry()
+        )
         return
     
     bot.answer_callback_query(call.id, "⏳ Membuat invoice OkayPay...")
@@ -1052,7 +1109,8 @@ def cb_pay_okaypay(call):
             else:
                 raise Exception("No payment URL returned")
         else:
-            raise Exception(result.get('message', 'OkayPay error'))
+            error_msg = result.get('message', 'OkayPay error')
+            raise Exception(error_msg)
             
     except Exception as e:
         print(f"Error creating OkayPay invoice: {e}")
@@ -1540,8 +1598,21 @@ if __name__ == '__main__':
     print("═" * 50)
     print("Payment Gateways:")
     print("  🔷 CryptoPay: Enabled")
-    print(f"  🟡 KkPay: {'Configured' if KKPAY_ID != 'YOUR_KKPAY_ID' else 'Not configured'}")
-    print(f"  🟢 OkayPay: {'Configured' if OKAYPAY_ID != 'YOUR_OKAYPAY_ID' else 'Not configured'}")
+    
+    # KkPay status
+    if is_kkpay_configured():
+        print(f"  🟡 KkPay: Configured (ID: {KKPAY_ID[:8]}...)")
+    else:
+        print("  🟡 KkPay: ❌ Not configured")
+        print("     Set KKPAY_ID and KKPAY_SECRET environment variables")
+    
+    # OkayPay status
+    if is_okaypay_configured():
+        print(f"  🟢 OkayPay: Configured (ID: {OKAYPAY_ID[:8]}...)")
+    else:
+        print("  🟢 OkayPay: ❌ Not configured")
+        print("     Set OKAYPAY_ID and OKAYPAY_TOKEN environment variables")
+    
     print("═" * 50)
     print("Bot running...")
     print("═" * 50)
